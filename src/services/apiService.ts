@@ -858,40 +858,128 @@ class ApiService {
       };
     }
 
-    try {
-      const response = await fetch('/api/fetch-sheet', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ sheetUrl, csvContent })
-      });
-
-      const data = await response.json();
-      return data;
-    } catch (err: any) {
-      // Fallback: direct fetch if public export URL
-      if (sheetUrl && sheetUrl.includes('/export?format=csv')) {
-        try {
-          const directRes = await fetch(sheetUrl);
-          if (directRes.ok) {
-            const txt = await directRes.text();
-            const parsed = parseCsvText(txt);
-            return {
-              success: true,
-              headers: parsed.headers,
-              rows: parsed.rows,
-              totalRows: parsed.totalRows
-            };
-          }
-        } catch {}
-      }
+    const cleanUrl = (sheetUrl || '').trim();
+    if (!cleanUrl) {
       return {
         success: false,
         headers: [],
         rows: [],
         totalRows: 0,
-        error: err.message || 'Failed to fetch Google Sheet data'
+        error: 'Please provide a valid Google Sheet link.'
       };
     }
+
+    const pubMatch = cleanUrl.match(/\/spreadsheets\/d\/e\/([a-zA-Z0-9-_]+)/);
+    const standardMatch = cleanUrl.match(/\/spreadsheets\/(?:u\/\d+\/)?d\/(?!e\/)([a-zA-Z0-9-_]+)/);
+    const gidMatch = cleanUrl.match(/[#&?]gid=([0-9]+)/);
+    const gid = gidMatch ? gidMatch[1] : '0';
+    const detectedSheetId = standardMatch ? standardMatch[1] : (pubMatch ? pubMatch[1] : undefined);
+
+    // ── TIER 1: Try Server Backend Proxy (/api/fetch-sheet) ───────────────────
+    try {
+      const response = await fetch('/api/fetch-sheet', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ sheetUrl: cleanUrl, csvContent }),
+        signal: AbortSignal.timeout(10000)
+      });
+
+      const contentType = response.headers.get('content-type') || '';
+      if (contentType.includes('application/json')) {
+        const data = await response.json();
+        if (data && data.success && Array.isArray(data.headers) && data.headers.length > 0) {
+          return data;
+        }
+      }
+    } catch {
+      // Backend not available (e.g. static hosting on GitHub Pages/Vercel static) - proceed to client fetch
+    }
+
+    // ── TIER 2: Direct Client-Side Fetch via GViz / Export API ─────────────────
+    // Google Visualization CSV endpoint supports cross-origin requests directly from web browsers
+    const clientCandidates: string[] = [];
+    if (pubMatch && pubMatch[1]) {
+      const pubId = pubMatch[1];
+      if (cleanUrl.includes('output=csv')) clientCandidates.push(cleanUrl);
+      if (cleanUrl.includes('/pubhtml')) clientCandidates.push(cleanUrl.replace('/pubhtml', '/pub?output=csv'));
+      clientCandidates.push(
+        `https://docs.google.com/spreadsheets/d/e/${pubId}/pub?output=csv&gid=${gid}`,
+        `https://docs.google.com/spreadsheets/d/e/${pubId}/pub?output=csv`
+      );
+    } else if (standardMatch && standardMatch[1]) {
+      const sId = standardMatch[1];
+      clientCandidates.push(
+        `https://docs.google.com/spreadsheets/d/${sId}/gviz/tq?tqx=out:csv&gid=${gid}`,
+        `https://docs.google.com/spreadsheets/d/${sId}/export?format=csv&gid=${gid}`,
+        `https://docs.google.com/spreadsheets/d/${sId}/pub?output=csv&gid=${gid}`
+      );
+    } else if (cleanUrl.startsWith('http://') || cleanUrl.startsWith('https://')) {
+      clientCandidates.push(cleanUrl);
+    }
+
+    for (const targetUrl of clientCandidates) {
+      try {
+        const res = await fetch(targetUrl, {
+          signal: AbortSignal.timeout(9000)
+        });
+        if (res.ok) {
+          const text = await res.text();
+          if (
+            text &&
+            !text.includes('<!DOCTYPE html') &&
+            !text.includes('<html') &&
+            !text.includes('ServiceLogin') &&
+            !text.includes('Sign in - Google Accounts')
+          ) {
+            const parsed = parseCsvText(text);
+            if (parsed.headers && parsed.headers.length > 0) {
+              return {
+                success: true,
+                sheetId: detectedSheetId,
+                headers: parsed.headers,
+                rows: parsed.rows,
+                totalRows: parsed.totalRows
+              };
+            }
+          }
+        }
+      } catch {
+        // Try next candidate
+      }
+    }
+
+    // ── TIER 3: Direct Google Apps Script Web App Fallback ────────────────────
+    // If the sheet is restricted, GAS Web App executes under authorized Google account
+    if (this.config.gasWebAppUrl) {
+      try {
+        const gasRes = await this.triggerGasAction('managerFetchSheetByUrl', [
+          this.config.passcode || 'Gowell921',
+          cleanUrl
+        ]);
+        const gasData = gasRes && (gasRes.data !== undefined ? gasRes.data : gasRes.result !== undefined ? gasRes.result : gasRes);
+        if (gasData && gasData.success && Array.isArray(gasData.headers) && gasData.headers.length > 0) {
+          return {
+            success: true,
+            sheetId: detectedSheetId,
+            headers: gasData.headers,
+            rows: gasData.rows || [],
+            totalRows: gasData.totalRows || (gasData.rows ? gasData.rows.length : 0)
+          };
+        }
+      } catch {
+        // GAS fallback failed
+      }
+    }
+
+    // ── TIER 4: Informative Actionable Error Guidance ─────────────────────────
+    return {
+      success: false,
+      headers: [],
+      rows: [],
+      totalRows: 0,
+      isPrivateSheet: true,
+      error: "Unable to read Google Sheet automatically. Please ensure link sharing is set to 'Anyone with the link can view' (In Google Sheets: Share → General access → Anyone with the link → Viewer), or copy and paste the sheet rows / CSV file directly."
+    };
   }
 
   public async importExternalCandidates(params: {

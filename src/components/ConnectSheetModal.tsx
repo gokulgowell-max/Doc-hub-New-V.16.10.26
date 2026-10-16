@@ -197,7 +197,18 @@ export const ConnectSheetModal: React.FC<ConnectSheetModalProps> = ({
       // Advance to Step 2: Header Mapping
       setCurrentStep(2);
     } catch (err: any) {
-      setFetchError(err.message || 'Error connecting to Google Sheet.');
+      const errMsg = err?.message || 'Error connecting to Google Sheet.';
+      setFetchError(errMsg);
+      if (
+        errMsg.toLowerCase().includes('private') ||
+        errMsg.toLowerCase().includes('anyone with the link') ||
+        errMsg.toLowerCase().includes('failed to fetch') ||
+        errMsg.toLowerCase().includes('network') ||
+        errMsg.toLowerCase().includes('permission') ||
+        errMsg.toLowerCase().includes('unable to read')
+      ) {
+        setIsPrivateSheetError(true);
+      }
     } finally {
       setIsFetching(false);
     }

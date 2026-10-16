@@ -1543,27 +1543,34 @@ function managerGetAllSubmissions(passcode) {
 }
 
 function managerFetchSheetByUrl(passcode, sheetUrl) {
-  verifyManagerAccess_(passcode);
-  if (!sheetUrl) return JSON.stringify({ success: false, error: 'Sheet URL is required' });
-  var targetSs = SpreadsheetApp.openByUrl(sheetUrl);
-  var targetSheet = targetSs.getSheets()[0];
-  var sheetData = targetSheet.getDataRange().getValues();
-  if (!sheetData || sheetData.length === 0) {
-    return JSON.stringify({ success: false, error: 'The sheet appears to be empty.' });
-  }
-  var headers = sheetData[0].map(function(c) { return String(c || '').trim(); });
-  var rows = sheetData.slice(1).map(function(r) {
-    return r.map(function(cell) {
-      if (cell instanceof Date) return cell.toISOString();
-      return cell != null ? String(cell) : '';
+  try {
+    verifyManagerAccess_(passcode);
+    if (!sheetUrl) return JSON.stringify({ success: false, error: 'Sheet URL is required' });
+    var targetSs = SpreadsheetApp.openByUrl(sheetUrl);
+    var targetSheet = targetSs.getSheets()[0];
+    var sheetData = targetSheet.getDataRange().getValues();
+    if (!sheetData || sheetData.length === 0) {
+      return JSON.stringify({ success: false, error: 'The sheet appears to be empty.' });
+    }
+    var headers = sheetData[0].map(function(c) { return String(c || '').trim(); });
+    var rows = sheetData.slice(1).map(function(r) {
+      return r.map(function(cell) {
+        if (cell instanceof Date) return cell.toISOString();
+        return cell != null ? String(cell) : '';
+      });
     });
-  });
-  return JSON.stringify({
-    success: true,
-    headers: headers,
-    rows: rows,
-    totalRows: rows.length
-  });
+    return JSON.stringify({
+      success: true,
+      headers: headers,
+      rows: rows,
+      totalRows: rows.length
+    });
+  } catch(err) {
+    return JSON.stringify({
+      success: false,
+      error: 'Google Apps Script could not open sheet: ' + err.toString()
+    });
+  }
 }
 `;
 };
