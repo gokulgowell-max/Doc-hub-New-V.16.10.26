@@ -1,0 +1,295 @@
+<script>
+  let allProjects = [];
+  let allSubmissions = [];
+  let currentSelectedFile = null;
+  let isDocAuthenticated = false;
+
+  window.addEventListener('DOMContentLoaded', () => {
+    lucide.createIcons();
+    fetchInitialData();
+  });
+
+  // Switch between Recruiter Portal and Documentation Desk
+  function switchView(view) {
+    const recView = document.getElementById('view-recruiter');
+    const docView = document.getElementById('view-documentation');
+    const btnRec = document.getElementById('nav-recruiter');
+    const btnDoc = document.getElementById('nav-documentation');
+
+    if (view === 'recruiter') {
+      recView.classList.remove('hidden');
+      docView.classList.add('hidden');
+      btnRec.className = 'flex items-center space-x-1.5 px-3.5 py-1.5 rounded-lg text-xs font-bold transition-all bg-blue-600 text-white shadow-xs';
+      btnDoc.className = 'flex items-center space-x-1.5 px-3.5 py-1.5 rounded-lg text-xs font-bold transition-all text-slate-600 hover:text-slate-900';
+    } else {
+      recView.classList.add('hidden');
+      docView.classList.remove('hidden');
+      btnDoc.className = 'flex items-center space-x-1.5 px-3.5 py-1.5 rounded-lg text-xs font-bold transition-all bg-blue-600 text-white shadow-xs';
+      btnRec.className = 'flex items-center space-x-1.5 px-3.5 py-1.5 rounded-lg text-xs font-bold transition-all text-slate-600 hover:text-slate-900';
+    }
+  }
+
+  // Fetch Projects & Submissions from Code.gs
+  function fetchInitialData() {
+    google.script.run
+      .withSuccessHandler(projects => {
+        allProjects = projects || [];
+        populateProjectDropdown();
+        populateDocProjectFilter();
+      })
+      .getProjects();
+
+    google.script.run
+      .withSuccessHandler(subs => {
+        allSubmissions = subs || [];
+        renderRecentSubmissions();
+        filterDocSubmissions();
+        populateDocRecruiterFilter();
+      })
+      .getSubmissions();
+  }
+
+  // Populate Dropdown
+  function populateProjectDropdown() {
+    const dropdown = document.getElementById('project-dropdown');
+    dropdown.innerHTML = '<option value="" disabled selected>Select project name...</option>';
+    allProjects.forEach(p => {
+      const opt = document.createElement('option');
+      opt.value = p.name;
+      opt.textContent = p.name;
+      dropdown.appendChild(opt);
+    });
+  }
+
+  // Dynamic Project Questionnaire
+  function onProjectSelectChange() {
+    const selectedName = document.getElementById('project-dropdown').value;
+    const project = allProjects.find(p => p.name === selectedName);
+    const container = document.getElementById('dynamic-questions-container');
+    const fieldsList = document.getElementById('dynamic-fields-list');
+
+    if (!project || !project.fields || project.fields.length === 0) {
+      container.classList.add('hidden');
+      fieldsList.innerHTML = '';
+      return;
+    }
+
+    container.classList.remove('hidden');
+    fieldsList.innerHTML = '';
+
+    project.fields.forEach(f => {
+      const wrapper = document.createElement('div');
+      wrapper.className = 'space-y-1';
+
+      const label = document.createElement('label');
+      label.className = 'block text-xs font-bold text-slate-700 uppercase';
+      label.textContent = f.label + (f.required ? ' *' : '');
+      wrapper.appendChild(label);
+
+      if (f.type === 'select' && f.options) {
+        const select = document.createElement('select');
+        select.name = f.id;
+        select.required = !!f.required;
+        select.className = 'w-full px-3 py-2 bg-slate-50 border border-slate-300 rounded-xl text-xs font-semibold focus:ring-2 focus:ring-blue-400 focus:bg-white';
+        select.innerHTML = '<option value="">Select option...</option>';
+        f.options.forEach(opt => {
+          select.innerHTML += `<option value="${opt}">${opt}</option>`;
+        });
+        wrapper.appendChild(select);
+      } else {
+        const input = document.createElement('input');
+        input.type = f.type === 'number' ? 'number' : 'text';
+        input.name = f.id;
+        input.required = !!f.required;
+        input.placeholder = `Enter ${f.label.toLowerCase()}...`;
+        input.className = 'w-full px-3 py-2 bg-slate-50 border border-slate-300 rounded-xl text-xs font-medium focus:ring-2 focus:ring-blue-400 focus:bg-white';
+        wrapper.appendChild(input);
+      }
+
+      fieldsList.appendChild(wrapper);
+    });
+  }
+
+  // File Upload Handler
+  function handleFileSelected(event) {
+    const file = event.target.files[0];
+    if (!file) return;
+
+    const reader = new FileReader();
+    reader.onload = function(e) {
+      currentSelectedFile = {
+        name: file.name,
+        type: file.type,
+        base64: e.target.result
+      };
+      document.getElementById('file-upload-label').textContent = 'Attached: ' + file.name;
+    };
+    reader.readAsDataURL(file);
+  }
+
+  // Submit Form
+  function handleFormSubmit(event) {
+    event.preventDefault();
+    const btn = document.getElementById('submit-btn');
+    const alertBox = document.getElementById('form-alert');
+    
+    btn.disabled = true;
+    btn.innerHTML = '<i data-lucide="loader-2" class="w-4 h-4 animate-spin"></i><span>Submitting to Google Sheets & Drive...</span>';
+    lucide.createIcons();
+
+    // Collect dynamic answers
+    const dynamicAnswers = {};
+    const dynamicInputs = document.getElementById('dynamic-fields-list').querySelectorAll('input, select');
+    dynamicInputs.forEach(input => {
+      if (input.name) dynamicAnswers[input.name] = input.value;
+    });
+
+    const payload = {
+      project: document.getElementById('project-dropdown').value,
+      candidateName: document.getElementById('candidate-name').value,
+      passportNumber: document.getElementById('candidate-passport').value,
+      mobileNumber: document.getElementById('candidate-mobile').value,
+      recruiter: document.getElementById('recruiter-name-input').value || 'Recruiter',
+      dynamicAnswers: dynamicAnswers,
+      fileBase64: currentSelectedFile ? currentSelectedFile.base64 : '',
+      fileName: currentSelectedFile ? currentSelectedFile.name : '',
+      fileType: currentSelectedFile ? currentSelectedFile.type : ''
+    };
+
+    google.script.run
+      .withSuccessHandler(res => {
+        btn.disabled = false;
+        btn.innerHTML = '<i data-lucide="send" class="w-4 h-4"></i><span>Submit Candidate Dossier</span>';
+        lucide.createIcons();
+
+        if (res.success) {
+          alertBox.className = 'p-4 rounded-xl text-xs font-bold bg-emerald-50 text-emerald-800 border border-emerald-200 block';
+          alertBox.textContent = '✅ ' + res.message;
+          document.getElementById('candidate-intake-form').reset();
+          document.getElementById('file-upload-label').textContent = 'Click to select CV document';
+          currentSelectedFile = null;
+          fetchInitialData();
+        } else {
+          alertBox.className = 'p-4 rounded-xl text-xs font-bold bg-rose-50 text-rose-800 border border-rose-200 block';
+          alertBox.textContent = '❌ ' + res.message;
+        }
+      })
+      .withFailureHandler(err => {
+        btn.disabled = false;
+        btn.innerHTML = '<i data-lucide="send" class="w-4 h-4"></i><span>Submit Candidate Dossier</span>';
+        lucide.createIcons();
+        alertBox.className = 'p-4 rounded-xl text-xs font-bold bg-rose-50 text-rose-800 border border-rose-200 block';
+        alertBox.textContent = 'System error: ' + err.toString();
+      })
+      .submitCandidateForm(payload);
+  }
+
+  // Render Recruiter Recent Submissions
+  function renderRecentSubmissions() {
+    const list = document.getElementById('recent-submissions-list');
+    if (allSubmissions.length === 0) {
+      list.innerHTML = '<p class="text-xs text-slate-400 text-center py-6">No candidate submissions yet.</p>';
+      return;
+    }
+
+    list.innerHTML = allSubmissions.slice(-10).reverse().map(sub => `
+      <div class="p-3 bg-slate-50 hover:bg-blue-50/60 border border-slate-200 rounded-xl transition-all space-y-1">
+        <div class="flex items-center justify-between">
+          <span class="font-bold text-xs text-slate-900 truncate">${sub.candidateName}</span>
+          <span class="text-[10px] font-mono bg-slate-200 text-slate-700 px-1.5 py-0.5 rounded font-bold">${sub.passportNumber}</span>
+        </div>
+        ${sub.mobileNumber ? `<div class="text-[11px] text-slate-600 font-medium">📞 ${sub.mobileNumber}</div>` : ''}
+        <div class="flex items-center justify-between text-[11px] text-slate-500 pt-1">
+          <span class="font-semibold text-slate-700 truncate max-w-[140px]">${sub.project}</span>
+          <span>${new Date(sub.timestamp).toLocaleDateString()}</span>
+        </div>
+      </div>
+    `).join('');
+  }
+
+  // Documentation Auth
+  function handleDocLogin(e) {
+    e.preventDefault();
+    const pass = document.getElementById('doc-password-input').value;
+    if (pass === 'Gowell123') {
+      isDocAuthenticated = true;
+      document.getElementById('doc-login-card').classList.add('hidden');
+      document.getElementById('doc-authenticated-desk').classList.remove('hidden');
+      filterDocSubmissions();
+    } else {
+      const err = document.getElementById('doc-login-error');
+      err.textContent = 'Incorrect password. Default is Gowell123';
+      err.classList.remove('hidden');
+    }
+  }
+
+  function handleDocLogout() {
+    isDocAuthenticated = false;
+    document.getElementById('doc-authenticated-desk').classList.add('hidden');
+    document.getElementById('doc-login-card').classList.remove('hidden');
+    document.getElementById('doc-password-input').value = '';
+  }
+
+  // Populate Filter Dropdowns
+  function populateDocProjectFilter() {
+    const sel = document.getElementById('doc-project-filter');
+    sel.innerHTML = '<option value="All">All Projects</option>';
+    allProjects.forEach(p => {
+      sel.innerHTML += `<option value="${p.name}">${p.name}</option>`;
+    });
+  }
+
+  function populateDocRecruiterFilter() {
+    const sel = document.getElementById('doc-recruiter-filter');
+    const recruiters = Array.from(new Set(allSubmissions.map(s => s.recruiter).filter(Boolean)));
+    sel.innerHTML = '<option value="All">All Recruiters</option>';
+    recruiters.forEach(r => {
+      sel.innerHTML += `<option value="${r}">${r}</option>`;
+    });
+  }
+
+  // Filter & Search Documentation Table
+  function filterDocSubmissions() {
+    if (!isDocAuthenticated) return;
+    const query = (document.getElementById('global-search-input').value || '').toLowerCase();
+    const projFilter = document.getElementById('doc-project-filter').value;
+    const recFilter = document.getElementById('doc-recruiter-filter').value;
+    const tbody = document.getElementById('doc-search-results');
+
+    const filtered = allSubmissions.filter(sub => {
+      if (projFilter !== 'All' && sub.project !== projFilter) return false;
+      if (recFilter !== 'All' && sub.recruiter !== recFilter) return false;
+      if (query) {
+        return (
+          (sub.candidateName || '').toLowerCase().includes(query) ||
+          (sub.passportNumber || '').toLowerCase().includes(query) ||
+          (sub.project || '').toLowerCase().includes(query) ||
+          (sub.mobileNumber || '').toLowerCase().includes(query) ||
+          (sub.recruiter || '').toLowerCase().includes(query)
+        );
+      }
+      return true;
+    });
+
+    if (filtered.length === 0) {
+      tbody.innerHTML = '<tr><td colspan="6" class="text-center py-8 text-slate-400 font-medium">No matching candidate records found.</td></tr>';
+      return;
+    }
+
+    tbody.innerHTML = filtered.map(sub => `
+      <tr class="hover:bg-blue-50/40 transition-colors">
+        <td class="py-3 px-4">
+          <div class="font-bold text-slate-900">${sub.candidateName}</div>
+          <div class="font-mono text-slate-500 font-bold text-[11px]">${sub.passportNumber}</div>
+        </td>
+        <td class="py-3 px-4 font-semibold text-slate-800">${sub.project}</td>
+        <td class="py-3 px-4 font-mono text-slate-700">${sub.mobileNumber || '—'}</td>
+        <td class="py-3 px-4 text-slate-800">${sub.recruiter}</td>
+        <td class="py-3 px-4 text-slate-500">${new Date(sub.timestamp).toLocaleDateString()}</td>
+        <td class="py-3 px-4">
+          ${sub.fileUrl ? `<a href="${sub.fileUrl}" target="_blank" class="inline-flex items-center gap-1 text-blue-600 hover:text-blue-800 font-bold text-[11px] bg-blue-50 px-2 py-1 rounded">View CV</a>` : '<span class="text-slate-400">No CV</span>'}
+        </td>
+      </tr>
+    `).join('');
+  }
+</script>

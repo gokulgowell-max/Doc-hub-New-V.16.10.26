@@ -1,0 +1,309 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <title>Dynamic Document Hub</title>
+  <!-- Tailwind CSS CDN -->
+  <script src="https://cdn.tailwindcss.com"></script>
+  <!-- Lucide Icons -->
+  <script src="https://unpkg.com/lucide@latest"></script>
+  <?!= include('CSS'); ?>
+</head>
+<body class="bg-slate-50 text-slate-900 font-sans min-h-screen flex flex-col antialiased selection:bg-blue-600 selection:text-white">
+
+  <!-- TOP NAVBAR -->
+  <header class="sticky top-0 z-40 bg-white/95 backdrop-blur-md border-b border-slate-200 shadow-xs">
+    <div class="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 h-16 flex items-center justify-between">
+      
+      <!-- Brand Logo -->
+      <div class="flex items-center space-x-3 cursor-pointer" onclick="switchView('recruiter')">
+        <div class="w-10 h-10 rounded-xl bg-blue-600 flex items-center justify-center text-white shadow-md shadow-blue-500/20">
+          <i data-lucide="layers" class="w-5 h-5"></i>
+        </div>
+        <div>
+          <span class="font-extrabold text-lg text-slate-900 leading-none block">Dynamic Document Hub</span>
+          <span class="text-[11px] text-slate-600 font-semibold tracking-wide">Documentation & Candidate Intake</span>
+        </div>
+      </div>
+
+      <!-- Navigation Tabs -->
+      <div class="flex items-center bg-slate-100 p-1 rounded-xl border border-slate-200">
+        <button id="nav-recruiter" onclick="switchView('recruiter')" class="flex items-center space-x-1.5 px-3.5 py-1.5 rounded-lg text-xs font-bold transition-all bg-blue-600 text-white shadow-xs">
+          <i data-lucide="user-check" class="w-3.5 h-3.5"></i>
+          <span>Recruiter Portal</span>
+        </button>
+        <button id="nav-documentation" onclick="switchView('documentation')" class="flex items-center space-x-1.5 px-3.5 py-1.5 rounded-lg text-xs font-bold transition-all text-slate-600 hover:text-slate-900">
+          <i data-lucide="search" class="w-3.5 h-3.5"></i>
+          <span>Documentation Desk</span>
+        </button>
+      </div>
+
+    </div>
+  </header>
+
+  <!-- MAIN BODY -->
+  <main class="flex-1 max-w-7xl w-full mx-auto px-4 sm:px-6 lg:px-8 py-8">
+    
+    <!-- ========================================== -->
+    <!-- VIEW 1: RECRUITER PORTAL -->
+    <!-- ========================================== -->
+    <div id="view-recruiter" class="space-y-6">
+      
+      <!-- Recruiter Select & Info Strip -->
+      <div class="bg-gradient-to-r from-blue-900 via-indigo-900 to-slate-900 rounded-3xl p-6 sm:p-8 text-white shadow-xl flex flex-col md:flex-row justify-between items-start md:items-center gap-4">
+        <div>
+          <span class="inline-flex items-center gap-1.5 px-3 py-1 rounded-full bg-blue-500/20 text-blue-300 text-xs font-bold border border-blue-400/30 mb-2">
+            <i data-lucide="check-circle-2" class="w-3.5 h-3.5"></i> Candidate Intake Portal
+          </span>
+          <h1 class="text-2xl sm:text-3xl font-extrabold tracking-tight">Upload Candidate Dossier</h1>
+          <p class="text-xs text-slate-300 mt-1 max-w-xl">
+            Select the project name, enter candidate credentials, attach document CV, and record to Google Sheets & Drive.
+          </p>
+        </div>
+
+        <div class="bg-slate-800/80 border border-slate-700 rounded-2xl p-3 px-4 flex items-center space-x-3">
+          <div class="w-9 h-9 rounded-xl bg-blue-600/30 text-blue-300 flex items-center justify-center font-bold">
+            <i data-lucide="user" class="w-4 h-4"></i>
+          </div>
+          <div>
+            <span class="text-[10px] uppercase font-bold text-slate-400 block">Recruiter Account</span>
+            <input type="text" id="recruiter-name-input" value="Gokul Recruiter" class="bg-slate-950 text-white text-xs font-bold px-2 py-0.5 rounded border border-slate-600 focus:outline-hidden focus:border-blue-400" />
+          </div>
+        </div>
+      </div>
+
+      <!-- Main Form & Submission Area -->
+      <div class="grid grid-cols-1 lg:grid-cols-12 gap-8">
+        
+        <!-- Left: Intake Form (8 cols) -->
+        <div class="lg:col-span-8 space-y-6">
+          
+          <form id="candidate-intake-form" onsubmit="handleFormSubmit(event)" class="space-y-6">
+            
+            <!-- 1. Select Target Project (Dropdown) -->
+            <div class="bg-white rounded-2xl p-6 border border-slate-200 shadow-xs space-y-3">
+              <div class="flex items-center space-x-2.5">
+                <div class="w-7 h-7 rounded-lg bg-blue-100 text-blue-700 flex items-center justify-center font-bold text-xs">
+                  1
+                </div>
+                <div>
+                  <h2 class="font-bold text-slate-900 text-sm">Select Target Project</h2>
+                  <p class="text-xs text-slate-500">Choose project name from dropdown list</p>
+                </div>
+              </div>
+
+              <select id="project-dropdown" onchange="onProjectSelectChange()" required class="w-full bg-slate-50 border border-slate-300 focus:border-blue-500 rounded-xl px-4 py-2.5 text-sm font-semibold focus:ring-2 focus:ring-blue-400/20">
+                <option value="" disabled selected>Loading active projects...</option>
+              </select>
+            </div>
+
+            <!-- 2. Candidate Core Credentials -->
+            <div class="bg-white rounded-2xl p-6 border border-slate-200 shadow-xs space-y-4">
+              <div class="flex items-center space-x-2.5">
+                <div class="w-7 h-7 rounded-lg bg-blue-100 text-blue-700 flex items-center justify-center font-bold text-xs">
+                  2
+                </div>
+                <div>
+                  <h2 class="font-bold text-slate-900 text-sm">Candidate Information</h2>
+                  <p class="text-xs text-slate-500">Full passport name, ID number, and contact info</p>
+                </div>
+              </div>
+
+              <div class="grid grid-cols-1 sm:grid-cols-2 gap-4">
+                <div class="space-y-1">
+                  <label class="block text-xs font-bold text-slate-700 uppercase">Full Name (As Per Passport) *</label>
+                  <input type="text" id="candidate-name" required placeholder="e.g. Rahul Sharma" class="w-full px-3.5 py-2 bg-slate-50 border border-slate-300 rounded-xl text-sm font-medium focus:ring-2 focus:ring-blue-400 focus:bg-white" />
+                </div>
+
+                <div class="space-y-1">
+                  <label class="block text-xs font-bold text-slate-700 uppercase">Passport Number *</label>
+                  <input type="text" id="candidate-passport" required placeholder="e.g. N1234567" class="w-full px-3.5 py-2 bg-slate-50 border border-slate-300 rounded-xl text-sm font-mono font-bold uppercase focus:ring-2 focus:ring-blue-400 focus:bg-white" />
+                </div>
+
+                <div class="space-y-1 sm:col-span-2">
+                  <label class="block text-xs font-bold text-slate-700 uppercase">Contact Mobile Number *</label>
+                  <input type="tel" id="candidate-mobile" required placeholder="e.g. +91 9876543210" class="w-full px-3.5 py-2 bg-slate-50 border border-slate-300 rounded-xl text-sm font-medium focus:ring-2 focus:ring-blue-400 focus:bg-white" />
+                </div>
+              </div>
+            </div>
+
+            <!-- 3. Dynamic Project Questions -->
+            <div id="dynamic-questions-container" class="bg-white rounded-2xl p-6 border border-slate-200 shadow-xs space-y-4 hidden">
+              <div class="flex items-center space-x-2.5">
+                <div class="w-7 h-7 rounded-lg bg-blue-100 text-blue-700 flex items-center justify-center font-bold text-xs">
+                  3
+                </div>
+                <div>
+                  <h2 class="font-bold text-slate-900 text-sm">Project Specific Questionnaire</h2>
+                  <p class="text-xs text-slate-500">Custom requirements defined for this client</p>
+                </div>
+              </div>
+
+              <div id="dynamic-fields-list" class="grid grid-cols-1 sm:grid-cols-2 gap-4">
+                <!-- Injected via JavaScript -->
+              </div>
+            </div>
+
+            <!-- 4. Document / CV Attachment -->
+            <div class="bg-white rounded-2xl p-6 border border-slate-200 shadow-xs space-y-4">
+              <div class="flex items-center space-x-2.5">
+                <div class="w-7 h-7 rounded-lg bg-blue-100 text-blue-700 flex items-center justify-center font-bold text-xs">
+                  4
+                </div>
+                <div>
+                  <h2 class="font-bold text-slate-900 text-sm">Attach Candidate CV / Document</h2>
+                  <p class="text-xs text-slate-500">PDF or Word format (auto-saved to Google Drive)</p>
+                </div>
+              </div>
+
+              <div class="border-2 border-dashed border-slate-300 hover:border-blue-500 rounded-2xl p-6 text-center cursor-pointer bg-slate-50 hover:bg-blue-50/40 transition-colors" onclick="document.getElementById('file-upload').click()">
+                <input type="file" id="file-upload" class="hidden" accept=".pdf,.doc,.docx" onchange="handleFileSelected(event)" />
+                <i data-lucide="upload-cloud" class="w-8 h-8 text-blue-600 mx-auto mb-2"></i>
+                <span id="file-upload-label" class="text-xs font-bold text-slate-800 block">Click to select CV document</span>
+                <span class="text-[11px] text-slate-500">PDF, DOC, DOCX up to 10MB</span>
+              </div>
+            </div>
+
+            <!-- Submit Button & Messages -->
+            <div class="space-y-3">
+              <div id="form-alert" class="hidden p-4 rounded-xl text-xs font-bold"></div>
+
+              <button type="submit" id="submit-btn" class="w-full py-3.5 bg-blue-600 hover:bg-blue-700 text-white font-extrabold rounded-xl shadow-lg shadow-blue-500/20 transition-all flex items-center justify-center space-x-2 cursor-pointer">
+                <i data-lucide="send" class="w-4 h-4"></i>
+                <span>Submit Candidate Dossier</span>
+              </button>
+            </div>
+
+          </form>
+
+        </div>
+
+        <!-- Right: Recent Submissions (4 cols) -->
+        <div class="lg:col-span-4 space-y-6">
+          <div class="bg-white rounded-2xl p-6 border border-slate-200 shadow-xs space-y-4">
+            <div class="flex items-center justify-between">
+              <h3 class="font-bold text-sm text-slate-900">Your Recent Uploads</h3>
+              <button onclick="fetchInitialData()" class="p-1 text-slate-400 hover:text-blue-600">
+                <i data-lucide="refresh-cw" class="w-3.5 h-3.5"></i>
+              </button>
+            </div>
+
+            <div id="recent-submissions-list" class="space-y-3 max-h-[500px] overflow-y-auto pr-1">
+              <p class="text-xs text-slate-400 text-center py-6">Loading submissions...</p>
+            </div>
+          </div>
+        </div>
+
+      </div>
+
+    </div>
+
+    <!-- ========================================== -->
+    <!-- VIEW 2: DOCUMENTATION DESK (PASSWORD PROTECTED) -->
+    <!-- ========================================== -->
+    <div id="view-documentation" class="hidden space-y-6">
+      
+      <!-- Locked Screen -->
+      <div id="doc-login-card" class="max-w-md mx-auto my-12 p-8 bg-white rounded-3xl border border-slate-200 shadow-xl text-center">
+        <div class="w-14 h-14 rounded-2xl bg-indigo-50 border border-indigo-200 text-indigo-600 flex items-center justify-center mx-auto mb-4">
+          <i data-lucide="shield-check" class="w-7 h-7"></i>
+        </div>
+        <h2 class="text-xl font-extrabold text-slate-900 mb-1">Documentation Desk Locked</h2>
+        <p class="text-xs text-slate-500 mb-6">Enter password to unlock candidate search & verification desk.</p>
+
+        <form onsubmit="handleDocLogin(event)" class="space-y-4">
+          <input type="password" id="doc-password-input" placeholder="Password (Gowell123)" required class="w-full px-4 py-3 bg-slate-50 border border-slate-300 rounded-xl text-center text-base font-mono font-bold tracking-wider focus:ring-2 focus:ring-indigo-500 focus:bg-white" />
+          <div id="doc-login-error" class="hidden text-xs text-rose-600 font-bold"></div>
+          <button type="submit" class="w-full py-3 bg-indigo-900 hover:bg-indigo-800 text-white font-bold rounded-xl text-xs shadow-md transition-colors cursor-pointer">
+            Unlock Documentation Desk
+          </button>
+        </form>
+
+        <div class="mt-4 pt-4 border-t border-slate-100 text-[11px] text-slate-400">
+          Default Password: <span class="font-mono font-bold text-indigo-700 bg-indigo-50 px-1.5 py-0.5 rounded">Gowell123</span>
+        </div>
+      </div>
+
+      <!-- Authenticated Documentation Screen -->
+      <div id="doc-authenticated-desk" class="hidden space-y-6">
+        
+        <!-- Search Header -->
+        <div class="bg-gradient-to-r from-slate-900 via-indigo-950 to-slate-900 rounded-3xl p-6 sm:p-8 text-white shadow-xl flex flex-col md:flex-row justify-between items-start md:items-center gap-4">
+          <div>
+            <span class="inline-flex items-center gap-1.5 px-3 py-1 rounded-full bg-blue-500/20 text-blue-300 text-xs font-bold border border-blue-400/30 mb-2">
+              <i data-lucide="file-check" class="w-3.5 h-3.5"></i> GLOBAL CANDIDATE SEARCH & VERIFICATION
+            </span>
+            <h1 class="text-2xl font-extrabold tracking-tight">Documentation Desk</h1>
+            <p class="text-xs text-slate-300 mt-1 max-w-xl">
+              Cross-reference candidates by name, passport number, project, mobile phone, and attached CVs.
+            </p>
+          </div>
+
+          <div class="flex items-center space-x-2">
+            <button onclick="fetchInitialData()" class="px-3 py-2 bg-slate-800 hover:bg-slate-700 text-white rounded-xl text-xs font-bold flex items-center gap-1.5">
+              <i data-lucide="refresh-cw" class="w-3.5 h-3.5"></i> Sync Data
+            </button>
+            <button onclick="handleDocLogout()" class="px-3 py-2 bg-slate-800 hover:bg-rose-950 text-slate-300 hover:text-rose-300 rounded-xl text-xs font-bold flex items-center gap-1.5">
+              <i data-lucide="log-out" class="w-3.5 h-3.5"></i> Lock Desk
+            </button>
+          </div>
+        </div>
+
+        <!-- Global Search Bar & Filters -->
+        <div class="bg-white rounded-2xl p-5 border border-slate-200 shadow-xs space-y-4">
+          <div class="relative">
+            <div class="absolute inset-y-0 left-0 pl-4 flex items-center pointer-events-none text-blue-600">
+              <i data-lucide="search" class="w-5 h-5"></i>
+            </div>
+            <input type="text" id="global-search-input" onkeyup="filterDocSubmissions()" placeholder="Search candidate name, passport number (e.g. N1234567), project name, phone, or recruiter..." class="w-full pl-12 pr-4 py-3.5 bg-slate-50 border border-slate-300 focus:border-blue-600 rounded-xl text-sm font-medium focus:ring-2 focus:ring-blue-400 focus:bg-white" />
+          </div>
+
+          <div class="flex flex-wrap items-center gap-3">
+            <div class="flex items-center space-x-1.5">
+              <span class="text-xs font-semibold text-slate-500">Filter Project:</span>
+              <select id="doc-project-filter" onchange="filterDocSubmissions()" class="bg-slate-50 border border-slate-300 rounded-lg px-3 py-1.5 text-xs font-semibold">
+                <option value="All">All Projects</option>
+              </select>
+            </div>
+
+            <div class="flex items-center space-x-1.5">
+              <span class="text-xs font-semibold text-slate-500">Filter Recruiter:</span>
+              <select id="doc-recruiter-filter" onchange="filterDocSubmissions()" class="bg-slate-50 border border-slate-300 rounded-lg px-3 py-1.5 text-xs font-semibold">
+                <option value="All">All Recruiters</option>
+              </select>
+            </div>
+          </div>
+        </div>
+
+        <!-- Search Results Table -->
+        <div class="bg-white rounded-2xl border border-slate-200 shadow-xs overflow-hidden">
+          <div class="overflow-x-auto">
+            <table class="w-full text-left border-collapse">
+              <thead>
+                <tr class="bg-slate-50 border-b border-slate-200 text-[11px] font-bold text-slate-500 uppercase tracking-wider">
+                  <th class="py-3 px-4">Candidate & Passport</th>
+                  <th class="py-3 px-4">Project</th>
+                  <th class="py-3 px-4">Mobile</th>
+                  <th class="py-3 px-4">Recruiter</th>
+                  <th class="py-3 px-4">Date</th>
+                  <th class="py-3 px-4">Document</th>
+                </tr>
+              </thead>
+              <tbody id="doc-search-results" class="divide-y divide-slate-100 text-xs text-slate-700">
+                <tr>
+                  <td colspan="6" class="text-center py-8 text-slate-400">Loading candidate records...</td>
+                </tr>
+              </tbody>
+            </table>
+          </div>
+        </div>
+
+      </div>
+
+    </div>
+
+  </main>
+
+  <?!= include('JavaScript'); ?>
+</body>
+</html>

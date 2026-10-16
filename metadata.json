@@ -1,0 +1,6 @@
+{
+  "name": "Gowell Document Hub",
+  "description": "Gowell Document Hub - Recruitment Document & Intake Automation with Recruiter Portal, Documentation Desk with Global Candidate Search, and Manager Workspace.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
