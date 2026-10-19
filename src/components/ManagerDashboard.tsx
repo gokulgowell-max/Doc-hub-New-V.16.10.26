@@ -47,6 +47,7 @@ import { ConnectSheetModal } from './ConnectSheetModal';
 import { ErrorBoundary } from './ErrorBoundary';
 import { getFullCodeGsScript } from '../data/codeGsTemplate';
 import { formatDisplayDate, formatDisplayDateTime, formatTimeAgo } from '../utils/dateUtils';
+import { isTodaySubmission, isYesterdaySubmission, parseAndNormalizeTimestamp } from '../utils/csvParser';
 
 interface ManagerDashboardProps {
   projects: Project[];
@@ -232,6 +233,29 @@ export const ManagerDashboard: React.FC<ManagerDashboardProps> = ({
     }
   };
 
+  const handleResyncProjectSheet = async (projectName: string) => {
+    setIsSyncing(true);
+    setSettingsMessage(null);
+    try {
+      const res = await apiService.resyncExternalProjectSheet(projectName);
+      await loadData(true);
+      onRefreshData();
+      if (res.success) {
+        setSettingsMessage({
+          type: 'success',
+          text: `Project "${projectName}": Synced successfully! ${res.importedCount} new, ${res.updatedCount} updated candidates.`
+        });
+      } else {
+        setSettingsMessage({ type: 'error', text: res.message || 'Sheet sync failed.' });
+      }
+    } catch (err: any) {
+      setSettingsMessage({ type: 'error', text: 'Sync error: ' + (err.message || String(err)) });
+    } finally {
+      setIsSyncing(false);
+      setTimeout(() => setSettingsMessage(null), 6000);
+    }
+  };
+
   const handleClearDemoData = () => {
     setShowClearDemoConfirm(true);
   };
@@ -305,27 +329,32 @@ export const ManagerDashboard: React.FC<ManagerDashboardProps> = ({
       const now = new Date();
       const todayIso = now.toISOString().slice(0, 10);
 
-      // Calculate start of current week (Monday)
+      // Calculate current week bounds (Monday 00:00:00 to Sunday 23:59:59.999)
       const dayOfWeek = (now.getDay() + 6) % 7; // Monday = 0
       const startOfWeek = new Date(now.getFullYear(), now.getMonth(), now.getDate() - dayOfWeek, 0, 0, 0, 0);
+      const endOfWeek = new Date(now.getFullYear(), now.getMonth(), now.getDate() - dayOfWeek + 6, 23, 59, 59, 999);
 
-      // Calculate start of current month (1st of month)
+      // Calculate current month bounds (1st 00:00:00 to last day 23:59:59.999)
       const startOfMonth = new Date(now.getFullYear(), now.getMonth(), 1, 0, 0, 0, 0);
+      const endOfMonth = new Date(now.getFullYear(), now.getMonth() + 1, 0, 23, 59, 59, 999);
 
       result = result.filter(s => {
         if (!s.timestamp) return false;
-        const subDate = new Date(s.timestamp);
-        if (isNaN(subDate.getTime())) return true;
-        const subDateIso = subDate.toISOString().slice(0, 10);
 
         if (dateRangeFilter === 'today') {
-          return subDateIso === todayIso;
+          return isTodaySubmission(s.timestamp);
         }
+
+        const normTs = parseAndNormalizeTimestamp(s.timestamp, false) || s.timestamp;
+        const subDate = new Date(normTs);
+        if (isNaN(subDate.getTime())) return false;
+        const subDateIso = subDate.toISOString().slice(0, 10);
+
         if (dateRangeFilter === 'this_week') {
-          return subDate >= startOfWeek;
+          return subDate >= startOfWeek && subDate <= endOfWeek;
         }
         if (dateRangeFilter === 'this_month') {
-          return subDate >= startOfMonth;
+          return subDate >= startOfMonth && subDate <= endOfMonth;
         }
         if (dateRangeFilter === 'custom') {
           if (customStartDate && subDateIso < customStartDate) return false;
@@ -337,22 +366,29 @@ export const ManagerDashboard: React.FC<ManagerDashboardProps> = ({
     }
 
     const q = searchQuery.toLowerCase().trim();
-    if (!q) return result;
+    if (q) {
+      result = result.filter((s) => {
+        const role = s.jobRole || apiService.getEffectiveJobRole(s);
+        const altMob = s.altMobileNumber || apiService.getEffectiveAltMobile(s);
+        const email = s.emailId || apiService.getEffectiveEmail(s);
+        return (
+          s.candidateName.toLowerCase().includes(q) ||
+          s.passportNumber.toLowerCase().includes(q) ||
+          (s.mobileNumber && s.mobileNumber.toLowerCase().includes(q)) ||
+          (altMob && altMob.toLowerCase().includes(q)) ||
+          (email && email.toLowerCase().includes(q)) ||
+          (role && role.toLowerCase().includes(q)) ||
+          s.recruiter.toLowerCase().includes(q) ||
+          s.project.toLowerCase().includes(q)
+        );
+      });
+    }
 
-    return result.filter((s) => {
-      const role = s.jobRole || apiService.getEffectiveJobRole(s);
-      const altMob = s.altMobileNumber || apiService.getEffectiveAltMobile(s);
-      const email = s.emailId || apiService.getEffectiveEmail(s);
-      return (
-        s.candidateName.toLowerCase().includes(q) ||
-        s.passportNumber.toLowerCase().includes(q) ||
-        (s.mobileNumber && s.mobileNumber.toLowerCase().includes(q)) ||
-        (altMob && altMob.toLowerCase().includes(q)) ||
-        (email && email.toLowerCase().includes(q)) ||
-        (role && role.toLowerCase().includes(q)) ||
-        s.recruiter.toLowerCase().includes(q) ||
-        s.project.toLowerCase().includes(q)
-      );
+    // Always sort submissions chronologically newest first so latest submissions (e.g. today's candidates) appear at the top
+    return [...result].sort((a, b) => {
+      const ta = new Date(parseAndNormalizeTimestamp(a.timestamp, false) || a.timestamp).getTime() || 0;
+      const tb = new Date(parseAndNormalizeTimestamp(b.timestamp, false) || b.timestamp).getTime() || 0;
+      return tb - ta;
     });
   }, [submissions, searchQuery, filterProject, filterRecruiter, filterJobRole, dateRangeFilter, customStartDate, customEndDate]);
 
@@ -690,8 +726,25 @@ export const ManagerDashboard: React.FC<ManagerDashboardProps> = ({
   const yesterday = new Date(now.getTime() - 24 * 60 * 60 * 1000);
   const yesterdayStr = yesterday.toISOString().slice(0, 10);
 
-  const todayCount = allSubsList.filter(s => s.timestamp && s.timestamp.slice(0, 10) === todayStr).length;
-  const yesterdayCount = allSubsList.filter(s => s.timestamp && s.timestamp.slice(0, 10) === yesterdayStr).length;
+  const dayOfWeek = (now.getDay() + 6) % 7;
+  const startOfWeek = new Date(now.getFullYear(), now.getMonth(), now.getDate() - dayOfWeek, 0, 0, 0, 0);
+  const endOfWeek = new Date(now.getFullYear(), now.getMonth(), now.getDate() - dayOfWeek + 6, 23, 59, 59, 999);
+  const startOfMonth = new Date(now.getFullYear(), now.getMonth(), 1, 0, 0, 0, 0);
+  const endOfMonth = new Date(now.getFullYear(), now.getMonth() + 1, 0, 23, 59, 59, 999);
+
+  const todayCount = allSubsList.filter(s => isTodaySubmission(s.timestamp)).length;
+  const yesterdayCount = allSubsList.filter(s => isYesterdaySubmission(s.timestamp)).length;
+  const weekCount = allSubsList.filter(s => {
+    if (!s.timestamp) return false;
+    const d = new Date(parseAndNormalizeTimestamp(s.timestamp, false) || s.timestamp);
+    return !isNaN(d.getTime()) && d >= startOfWeek && d <= endOfWeek;
+  }).length;
+  const monthCount = allSubsList.filter(s => {
+    if (!s.timestamp) return false;
+    const d = new Date(parseAndNormalizeTimestamp(s.timestamp, false) || s.timestamp);
+    return !isNaN(d.getTime()) && d >= startOfMonth && d <= endOfMonth;
+  }).length;
+  const externalConnectedProjectsCount = projects.filter(p => p.sheetUrl && typeof p.sheetUrl === 'string' && p.sheetUrl.trim().length > 10).length;
   const activeProjectsCount = projects.filter(p => p.status === 'Open').length;
 
   const getProjectSubmissionCount = (proj: Project): number => {
@@ -1136,29 +1189,39 @@ export const ManagerDashboard: React.FC<ManagerDashboardProps> = ({
       {activeTab === 'submissions' && (
         <div className="bg-white rounded-3xl p-6 border border-slate-200 shadow-xs space-y-6 animate-fadeIn">
 
-          {/* Controls Bar */}
-          <div className="flex flex-col md:flex-row md:items-center justify-between gap-4">
+          {/* Controls Bar: Search, All Projects, All Job Roles, All Recruiters, Export CSV only */}
+          <div className="flex flex-col lg:flex-row lg:items-center justify-between gap-3">
 
             {/* Search Input */}
-            <div className="relative flex-1 max-w-md">
-              <Search className="w-4 h-4 text-slate-400 absolute left-3.5 top-3" />
+            <div className="relative flex-1 min-w-[240px] max-w-md">
+              <Search className="w-4 h-4 text-slate-400 absolute left-3.5 top-3 pointer-events-none" />
               <input
                 type="text"
-                placeholder="Search by candidate name, passport, phone..."
+                placeholder="Search candidate, passport, phone..."
                 value={searchQuery}
                 onChange={(e) => setSearchQuery(e.target.value.toUpperCase())}
-                className="w-full pl-10 pr-4 py-2.5 bg-slate-50 border border-slate-200 rounded-xl text-sm focus:outline-hidden focus:ring-2 focus:ring-blue-500 focus:bg-white text-slate-800 font-bold uppercase"
+                className="w-full pl-10 pr-9 py-2.5 bg-slate-50 hover:bg-slate-100/70 focus:bg-white border border-slate-200 rounded-xl text-sm focus:outline-hidden focus:ring-2 focus:ring-blue-500 text-slate-800 font-bold uppercase transition-all shadow-2xs placeholder:normal-case placeholder:font-normal placeholder:text-slate-400"
               />
+              {searchQuery && (
+                <button
+                  type="button"
+                  onClick={() => setSearchQuery('')}
+                  className="absolute right-2.5 top-2.5 p-1 text-slate-400 hover:text-slate-700 hover:bg-slate-200/60 rounded-lg transition-colors cursor-pointer"
+                  title="Clear search"
+                >
+                  <X className="w-3.5 h-3.5" />
+                </button>
+              )}
             </div>
 
             {/* Filter Dropdowns & CSV Export */}
-            <div className="flex flex-wrap items-center gap-3">
+            <div className="flex flex-wrap items-center gap-2.5">
 
-              {/* Project Filter */}
+              {/* All Projects Filter */}
               <select
                 value={filterProject}
                 onChange={(e) => setFilterProject(e.target.value)}
-                className="px-3 py-2 bg-slate-50 border border-slate-200 rounded-xl text-xs font-semibold text-slate-800 focus:outline-hidden cursor-pointer"
+                className="px-3 py-2 bg-slate-50 hover:bg-slate-100 border border-slate-200 rounded-xl text-xs font-semibold text-slate-800 focus:outline-hidden cursor-pointer max-w-[200px]"
               >
                 <option value="All Projects">All Projects</option>
                 {projects.map((p) => (
@@ -1166,11 +1229,11 @@ export const ManagerDashboard: React.FC<ManagerDashboardProps> = ({
                 ))}
               </select>
 
-              {/* Job Role Filter */}
+              {/* All Job Roles Filter */}
               <select
                 value={filterJobRole}
                 onChange={(e) => setFilterJobRole(e.target.value)}
-                className="px-3 py-2 bg-slate-50 border border-slate-200 rounded-xl text-xs font-semibold text-slate-800 focus:outline-hidden cursor-pointer"
+                className="px-3 py-2 bg-slate-50 hover:bg-slate-100 border border-slate-200 rounded-xl text-xs font-semibold text-slate-800 focus:outline-hidden cursor-pointer max-w-[170px]"
               >
                 <option value="All Roles">All Job Roles</option>
                 {availableJobRoles.map((r) => (
@@ -1178,11 +1241,11 @@ export const ManagerDashboard: React.FC<ManagerDashboardProps> = ({
                 ))}
               </select>
 
-              {/* Recruiter Filter */}
+              {/* All Recruiters Filter */}
               <select
                 value={filterRecruiter}
                 onChange={(e) => setFilterRecruiter(e.target.value)}
-                className="px-3 py-2 bg-slate-50 border border-slate-200 rounded-xl text-xs font-semibold text-slate-800 focus:outline-hidden cursor-pointer"
+                className="px-3 py-2 bg-slate-50 hover:bg-slate-100 border border-slate-200 rounded-xl text-xs font-semibold text-slate-800 focus:outline-hidden cursor-pointer max-w-[170px]"
               >
                 <option value="All Recruiters">All Recruiters</option>
                 {recruiters.map((r) => (
@@ -1190,21 +1253,10 @@ export const ManagerDashboard: React.FC<ManagerDashboardProps> = ({
                 ))}
               </select>
 
-              {/* Cloud Sync Button */}
-              <button
-                onClick={handleSyncCloudData}
-                disabled={isSyncing}
-                title="Fetch live records from Google Sheets backup"
-                className="inline-flex items-center gap-1.5 px-3.5 py-2 bg-emerald-50 hover:bg-emerald-100 text-emerald-800 border border-emerald-200 rounded-xl text-xs font-bold transition-all shadow-xs cursor-pointer disabled:opacity-50"
-              >
-                <RefreshCw className={`w-3.5 h-3.5 ${isSyncing ? 'animate-spin' : ''}`} />
-                <span>{isSyncing ? 'Syncing...' : 'Sync Cloud Data'}</span>
-              </button>
-
-              {/* CSV Export Button */}
+              {/* Export CSV Button */}
               <button
                 onClick={handleExportCSV}
-                className="inline-flex items-center gap-1.5 px-3.5 py-2 bg-slate-900 hover:bg-slate-800 text-white rounded-xl text-xs font-bold transition-all shadow-xs cursor-pointer"
+                className="inline-flex items-center gap-1.5 px-3.5 py-2 bg-slate-900 hover:bg-slate-800 text-white rounded-xl text-xs font-bold transition-all shadow-xs cursor-pointer shrink-0"
               >
                 <Download className="w-3.5 h-3.5" />
                 <span>Export CSV</span>
@@ -1243,7 +1295,7 @@ export const ManagerDashboard: React.FC<ManagerDashboardProps> = ({
                     : 'bg-white text-slate-600 hover:bg-slate-100 hover:text-slate-900 border border-slate-200'
                   }`}
               >
-                Today
+                Today ({todayCount})
               </button>
 
               <button
@@ -1254,7 +1306,7 @@ export const ManagerDashboard: React.FC<ManagerDashboardProps> = ({
                     : 'bg-white text-slate-600 hover:bg-slate-100 hover:text-slate-900 border border-slate-200'
                   }`}
               >
-                This Week
+                This Week ({weekCount})
               </button>
 
               <button
@@ -1265,7 +1317,7 @@ export const ManagerDashboard: React.FC<ManagerDashboardProps> = ({
                     : 'bg-white text-slate-600 hover:bg-slate-100 hover:text-slate-900 border border-slate-200'
                   }`}
               >
-                This Month
+                This Month ({monthCount})
               </button>
 
               <button
@@ -1606,12 +1658,23 @@ export const ManagerDashboard: React.FC<ManagerDashboardProps> = ({
                           </td>
                           <td className="py-3 text-right">
                             <div className="flex items-center justify-end gap-1.5">
+                              {proj.sheetUrl && (
+                                <button
+                                  onClick={() => handleResyncProjectSheet(proj.name)}
+                                  disabled={isSyncing}
+                                  className="px-2.5 py-1 bg-emerald-600/30 hover:bg-emerald-600/50 text-emerald-300 border border-emerald-500/40 rounded-lg text-xs font-medium transition-colors cursor-pointer flex items-center gap-1 disabled:opacity-50"
+                                  title="Sync new responses from connected Google Sheet immediately"
+                                >
+                                  <RefreshCw className={`w-3 h-3 ${isSyncing ? 'animate-spin' : ''}`} />
+                                  <span>Sync Now</span>
+                                </button>
+                              )}
                               <button
                                 onClick={() => handleOpenConnectSheet(proj.name)}
                                 className="px-2.5 py-1 bg-emerald-950/80 hover:bg-emerald-900 text-emerald-300 hover:text-emerald-200 border border-emerald-700/60 rounded-lg text-xs font-medium transition-colors cursor-pointer"
                                 title="Import or connect external Google Sheet for this project"
                               >
-                                Connect Sheet
+                                {proj.sheetUrl ? 'Re-Map' : 'Connect Sheet'}
                               </button>
                               <button
                                 onClick={() => handleOpenEditProject(proj)}
@@ -1774,6 +1837,17 @@ export const ManagerDashboard: React.FC<ManagerDashboardProps> = ({
                     </div>
 
                     <div className="flex items-center gap-2">
+                      {proj.sheetUrl && (
+                        <button
+                          onClick={() => handleResyncProjectSheet(proj.name)}
+                          disabled={isSyncing}
+                          className="px-2.5 py-1.5 bg-emerald-50 hover:bg-emerald-100 text-emerald-800 border border-emerald-200 rounded-lg text-xs font-bold transition-colors cursor-pointer flex items-center gap-1 disabled:opacity-50"
+                          title="Pull latest submissions from this Google Sheet right now"
+                        >
+                          <RefreshCw className={`w-3.5 h-3.5 ${isSyncing ? 'animate-spin' : ''}`} />
+                          <span>Sync Sheet</span>
+                        </button>
+                      )}
                       <button
                         onClick={() => setPreviewProject(proj)}
                         className="px-3 py-1.5 bg-blue-50 hover:bg-blue-100 text-blue-700 rounded-lg text-xs font-bold transition-colors cursor-pointer flex items-center gap-1"

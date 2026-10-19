@@ -1,6 +1,6 @@
 import { Project, CandidateSubmission, BackendConfig, RecruiterPerformance, ConnectionStatus, AutoSyncState, ProjectField } from '../types';
 import { DEFAULT_CONFIG, INITIAL_PROJECTS, INITIAL_RECRUITERS, INITIAL_SUBMISSIONS } from './defaultData';
-import { parseCsvText, detectHeaderMapping } from '../utils/csvParser';
+import { parseCsvText, detectHeaderMapping, parseAndNormalizeTimestamp, extractSubmissionDateFromRow, getValidTimestampMs, isTodaySubmission, isYesterdaySubmission, TargetFieldType } from '../utils/csvParser';
 
 const STORAGE_KEYS = {
   CONFIG: 'doc_hub_config_v3',
@@ -460,10 +460,13 @@ class ApiService {
       // 3. Sync candidate submissions from Google Sheets backup
       await this.syncSubmissionsFromRemote();
 
-      // 4. Recalculate project totals & today counts
+      // 4. Auto-Reflect: Sync all connected external Google Sheets
+      await this.syncAllExternalProjectSheets();
+
+      // 5. Recalculate project totals & today counts
       this.recalculateProjectCounts();
 
-      // 5. Push latest merged state back to server for other devices
+      // 6. Push latest merged state back to server for other devices
       await this.pushStateToServer();
 
       const totalSubs = this.submissions.length;
@@ -870,9 +873,9 @@ class ApiService {
     }
 
     const pubMatch = cleanUrl.match(/\/spreadsheets\/d\/e\/([a-zA-Z0-9-_]+)/);
-    const standardMatch = cleanUrl.match(/\/spreadsheets\/(?:u\/\d+\/)?d\/(?!e\/)([a-zA-Z0-9-_]+)/);
+    const standardMatch = cleanUrl.match(/(?:\/spreadsheets\/(?:u\/\d+\/)?d\/(?!e\/)|\/file\/d\/|[?&]id=|^)([a-zA-Z0-9-_]{20,})/);
     const gidMatch = cleanUrl.match(/[#&?]gid=([0-9]+)/);
-    const gid = gidMatch ? gidMatch[1] : '0';
+    const specificGid = gidMatch ? gidMatch[1] : undefined;
     const detectedSheetId = standardMatch ? standardMatch[1] : (pubMatch ? pubMatch[1] : undefined);
 
     // ── TIER 1: Try Server Backend Proxy (/api/fetch-sheet) ───────────────────
@@ -902,16 +905,29 @@ class ApiService {
       const pubId = pubMatch[1];
       if (cleanUrl.includes('output=csv')) clientCandidates.push(cleanUrl);
       if (cleanUrl.includes('/pubhtml')) clientCandidates.push(cleanUrl.replace('/pubhtml', '/pub?output=csv'));
+      if (specificGid) {
+        clientCandidates.push(`https://docs.google.com/spreadsheets/d/e/${pubId}/pub?output=csv&gid=${specificGid}`);
+      }
       clientCandidates.push(
-        `https://docs.google.com/spreadsheets/d/e/${pubId}/pub?output=csv&gid=${gid}`,
-        `https://docs.google.com/spreadsheets/d/e/${pubId}/pub?output=csv`
+        `https://docs.google.com/spreadsheets/d/e/${pubId}/pub?output=csv`,
+        `https://docs.google.com/spreadsheets/d/e/${pubId}/pub?output=csv&gid=0`
       );
     } else if (standardMatch && standardMatch[1]) {
       const sId = standardMatch[1];
+      // If user specified an exact gid, prioritize that tab
+      if (specificGid) {
+        clientCandidates.push(
+          `https://docs.google.com/spreadsheets/d/${sId}/gviz/tq?tqx=out:csv&gid=${specificGid}`,
+          `https://docs.google.com/spreadsheets/d/${sId}/export?format=csv&gid=${specificGid}`
+        );
+      }
+      // Always include no-gid GViz (which automatically accesses first visible sheet in any spreadsheet!)
       clientCandidates.push(
-        `https://docs.google.com/spreadsheets/d/${sId}/gviz/tq?tqx=out:csv&gid=${gid}`,
-        `https://docs.google.com/spreadsheets/d/${sId}/export?format=csv&gid=${gid}`,
-        `https://docs.google.com/spreadsheets/d/${sId}/pub?output=csv&gid=${gid}`
+        `https://docs.google.com/spreadsheets/d/${sId}/gviz/tq?tqx=out:csv`,
+        `https://docs.google.com/spreadsheets/d/${sId}/export?format=csv`,
+        `https://docs.google.com/spreadsheets/d/${sId}/pub?output=csv`,
+        `https://docs.google.com/spreadsheets/d/${sId}/gviz/tq?tqx=out:csv&gid=0`,
+        `https://docs.google.com/spreadsheets/d/${sId}/export?format=csv&gid=0`
       );
     } else if (cleanUrl.startsWith('http://') || cleanUrl.startsWith('https://')) {
       clientCandidates.push(cleanUrl);
@@ -1052,7 +1068,9 @@ class ApiService {
       if (!passNum && !candName) continue;
 
       const subId = raw.id || `sub-sheet-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`;
-      const subTimestamp = raw.timestamp || nowIso;
+      // Check the submission date of that external sheet and add that date to this site's database:
+      const normRawTs = raw.timestamp ? parseAndNormalizeTimestamp(raw.timestamp, false) : '';
+      const subTimestamp = normRawTs || nowIso;
       const subRecruiter = (raw.recruiter || '').trim() || 'Imported via Sheet';
       const subMobile = (raw.mobileNumber || '').trim();
       const subAltMobile = (raw.altMobileNumber || '').trim();
@@ -1079,9 +1097,13 @@ class ApiService {
       if (existingSubIndex >= 0) {
         if (params.updateExisting !== false) {
           const ex = this.submissions[existingSubIndex];
+          // Use the sheet's genuine submission date if present, otherwise retain candidate's existing submission date
+          const candidateTimestamp = normRawTs || ex.timestamp || nowIso;
           this.submissions[existingSubIndex] = {
             ...ex,
             ...raw,
+            id: ex.id || subId,
+            timestamp: candidateTimestamp,
             project: cleanProject,
             candidateName: candName.length >= (ex.candidateName || '').length ? candName : ex.candidateName,
             passportNumber: passNum || ex.passportNumber,
@@ -1186,7 +1208,9 @@ class ApiService {
           extractedRoles.add(val);
         }
         else if (mapKey === 'recruiter') item.recruiter = val;
-        else if (mapKey === 'timestamp') item.timestamp = val;
+        else if (mapKey === 'timestamp') {
+          item.timestamp = parseAndNormalizeTimestamp(val, false) || val;
+        }
         else if (mapKey === 'fileUrl') item.fileUrl = val;
         else if (mapKey === 'remarks') item.remarks = val;
         else {
@@ -1194,6 +1218,14 @@ class ApiService {
           item.dynamicAnswers[header] = val;
         }
       });
+
+      // If timestamp wasn't mapped, search the row for the submission date
+      if (!item.timestamp) {
+        const foundDate = extractSubmissionDateFromRow(fetched.headers, row, effectiveMapping);
+        if (foundDate) {
+          item.timestamp = foundDate;
+        }
+      }
 
       if (item.candidateName || item.passportNumber) {
         parsedCandidates.push(item);
@@ -1207,6 +1239,52 @@ class ApiService {
       candidates: parsedCandidates,
       jobRoles: Array.from(extractedRoles)
     });
+  }
+
+  /**
+   * Automatically polls and synchronizes all projects connected to external Google Sheets.
+   * If new submissions are added to the external sheet, they auto-reflect in this site.
+   * If existing submissions are updated, their date/time is updated to today so they show in today's submissions.
+   */
+  public async syncAllExternalProjectSheets(): Promise<{
+    syncedProjects: number;
+    newSubmissions: number;
+    updatedSubmissions: number;
+  }> {
+    const externalProjects = this.projects.filter(
+      p => p.sheetUrl && typeof p.sheetUrl === 'string' && p.sheetUrl.trim().length > 10
+    );
+
+    let totalNew = 0;
+    let totalUpdated = 0;
+    let synced = 0;
+
+    for (const proj of externalProjects) {
+      try {
+        const res = await this.resyncExternalProjectSheet(proj.name);
+        if (res.success) {
+          synced++;
+          totalNew += res.importedCount || 0;
+          totalUpdated += res.updatedCount || 0;
+        }
+      } catch (e) {
+        console.warn(`Error syncing external sheet for ${proj.name}:`, e);
+      }
+    }
+
+    if (totalNew > 0 || totalUpdated > 0) {
+      this.recalculateProjectCounts();
+      this.saveStored(STORAGE_KEYS.PROJECTS, this.projects);
+      this.saveStored(STORAGE_KEYS.SUBMISSIONS, this.submissions);
+      await this.pushStateToServer();
+      this.notifyListeners();
+    }
+
+    return {
+      syncedProjects: synced,
+      newSubmissions: totalNew,
+      updatedSubmissions: totalUpdated
+    };
   }
 
   public async testConnection(customConfig?: Partial<BackendConfig>): Promise<{ success: boolean; message: string; details?: any }> {
@@ -1557,9 +1635,20 @@ class ApiService {
         const bestRemarks = raw.remarks && raw.remarks.length > (ex.remarks || '').length ? raw.remarks : (ex.remarks || raw.remarks || '');
         const mergedDynamic = { ...(ex.dynamicAnswers || {}), ...(raw.dynamicAnswers || {}) };
 
-        const tsEx = new Date(ex.timestamp).getTime() || 0;
-        const tsRaw = new Date(raw.timestamp).getTime() || 0;
-        const bestTimestamp = tsRaw >= tsEx ? raw.timestamp : ex.timestamp;
+        const tsEx = getValidTimestampMs(ex.timestamp);
+        const tsRaw = getValidTimestampMs(raw.timestamp);
+        const normRaw = parseAndNormalizeTimestamp(raw.timestamp, false) || raw.timestamp;
+        const normEx = parseAndNormalizeTimestamp(ex.timestamp, false) || ex.timestamp;
+
+        const nowLimit = Date.now() + 24 * 60 * 60 * 1000;
+        let bestTimestamp = normRaw || normEx || new Date().toISOString();
+        if (tsRaw > nowLimit && tsEx <= nowLimit && tsEx > 0) {
+          bestTimestamp = normEx;
+        } else if (tsEx > nowLimit && tsRaw <= nowLimit && tsRaw > 0) {
+          bestTimestamp = normRaw;
+        } else {
+          bestTimestamp = tsRaw >= tsEx ? (normRaw || normEx) : (normEx || normRaw);
+        }
 
         const bestId = ex.id && !ex.id.startsWith('sub-raw') && !ex.id.startsWith('sub-gas') ? ex.id : (raw.id || ex.id);
 
@@ -1584,10 +1673,11 @@ class ApiService {
           status: ex.status || raw.status || 'Verified'
         };
       } else {
+        const normTs = parseAndNormalizeTimestamp(raw.timestamp, false) || raw.timestamp;
         consolidated.push({
           ...raw,
           id: raw.id || `sub-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`,
-          timestamp: raw.timestamp || new Date().toISOString(),
+          timestamp: normTs || new Date().toISOString(),
           project: projName,
           recruiter: raw.recruiter || 'Recruiter',
           candidateName: candName,
@@ -1605,7 +1695,7 @@ class ApiService {
       }
     }
 
-    consolidated.sort((a, b) => new Date(b.timestamp).getTime() - new Date(a.timestamp).getTime());
+    consolidated.sort((a, b) => getValidTimestampMs(b.timestamp) - getValidTimestampMs(a.timestamp));
     return consolidated;
   }
 
@@ -1624,7 +1714,7 @@ class ApiService {
     }
 
     // Sort newest first
-    list.sort((a, b) => new Date(b.timestamp).getTime() - new Date(a.timestamp).getTime());
+    list.sort((a, b) => getValidTimestampMs(b.timestamp) - getValidTimestampMs(a.timestamp));
     return list;
   }
 
@@ -1801,10 +1891,9 @@ class ApiService {
 
   // Recalculate today / total submission counts per project
   public recalculateProjectCounts(): void {
-    const todayStr = new Date().toISOString().slice(0, 10);
     this.projects = this.projects.map(p => {
       const projSubs = this.submissions.filter(s => this.isProjectMatch(s.project, p.name));
-      const todayCount = projSubs.filter(s => s.timestamp && s.timestamp.slice(0, 10) === todayStr).length;
+      const todayCount = projSubs.filter(s => isTodaySubmission(s.timestamp)).length;
       return {
         ...p,
         totalSubmissions: projSubs.length,
@@ -1938,12 +2027,20 @@ class ApiService {
   public async fetchAllProjectSheetsData(): Promise<{ success: boolean; projectCount: number; submissionCount: number; message: string }> {
     const projResult = await this.syncProjectsFromRemote();
     const subsResult = await this.syncSubmissionsFromRemote();
+    const extResult = await this.syncAllExternalProjectSheets();
+
+    const totalExtNew = extResult.newSubmissions;
+    const totalExtUpd = extResult.updatedSubmissions;
+    let extra = '';
+    if (totalExtNew > 0 || totalExtUpd > 0) {
+      extra = ` (${totalExtNew} new, ${totalExtUpd} updated from external sheets)`;
+    }
 
     return {
-      success: projResult.success || subsResult.success,
+      success: projResult.success || subsResult.success || extResult.syncedProjects > 0,
       projectCount: this.projects.length,
       submissionCount: this.submissions.length,
-      message: `Fetched ${this.submissions.length} candidate records across ${this.projects.length} project sheet(s).`
+      message: `Fetched and synced ${this.submissions.length} candidate records across ${this.projects.length} project sheet(s)${extra}.`
     };
   }
 
@@ -2075,10 +2172,13 @@ class ApiService {
       } else {
         this.submissions.unshift(newRecord);
       }
+      this.recalculateProjectCounts();
+      this.saveStored(STORAGE_KEYS.PROJECTS, this.projects);
       this.saveStored(STORAGE_KEYS.SUBMISSIONS, this.submissions);
 
-    // Push to server so candidate immediately appears on other devices / manager screens
-    this.pushStateToServer().catch(console.warn);
+      // Push to server so candidate immediately appears on other devices / manager screens
+      this.pushStateToServer().catch(console.warn);
+      this.notifyListeners();
 
     // Upload to Google Apps Script (Drive + Sheets) with robust handling
     let driveFileUrl = '';
@@ -2134,6 +2234,7 @@ class ApiService {
             }
             this.saveStored(STORAGE_KEYS.SUBMISSIONS, this.submissions);
             this.pushStateToServer().catch(console.warn);
+            this.notifyListeners();
           }
 
           // Trigger background sync so sheet rows sync into local state
@@ -2267,10 +2368,9 @@ class ApiService {
       const matched = this.recruiters.find(r => r.trim().toLowerCase() === rec.toLowerCase());
       if (matched && map[matched]) {
         map[matched].total++;
-        const subDate = sub.timestamp ? sub.timestamp.slice(0, 10) : '';
-        if (subDate === todayStr) {
+        if (isTodaySubmission(sub.timestamp)) {
           map[matched].today++;
-        } else if (subDate === yesterdayStr) {
+        } else if (isYesterdaySubmission(sub.timestamp)) {
           map[matched].yesterday++;
         }
       }

@@ -205,8 +205,8 @@ export function detectHeaderMapping(header: string): TargetFieldType {
     return 'remarks';
   }
 
-  // 10. Timestamp
-  if (/timestamp|submission.*date|date.*time|submitted.*at|created.*at|^date$/i.test(h)) {
+  // 10. Timestamp / Submission Date
+  if (/timestamp|time.*stamp|submission.*date|date.*submission|submitted|created.*at|created.*date|entry.*date|applied.*date|record.*date|^date$/i.test(h)) {
     return 'timestamp';
   }
 
@@ -217,4 +217,224 @@ export function detectHeaderMapping(header: string): TargetFieldType {
 
   // Default to custom field
   return 'custom';
+}
+
+/**
+ * Normalizes any date string (ISO, DD/MM/YYYY, MM/DD/YYYY, YYYY-MM-DD, AM/PM, or spreadsheet format)
+ * into a valid ISO string. Returns empty string if unparseable (or current time if fallbackToNow is true).
+ */
+export function parseAndNormalizeTimestamp(rawDate: any, fallbackToNow: boolean = false): string {
+  if (!rawDate) return fallbackToNow ? new Date().toISOString() : '';
+  if (rawDate instanceof Date) {
+    return isNaN(rawDate.getTime()) ? (fallbackToNow ? new Date().toISOString() : '') : rawDate.toISOString();
+  }
+  let str = String(rawDate).trim();
+  if (!str) return fallbackToNow ? new Date().toISOString() : '';
+
+  // 1. Numeric Excel / Google Sheets serial date (e.g. 45581 or 45581.5)
+  if (/^\d{5}(?:\.\d+)?$/.test(str)) {
+    const num = parseFloat(str);
+    const date = new Date(Math.round((num - 25569) * 86400 * 1000));
+    if (!isNaN(date.getTime()) && date.getFullYear() >= 1990 && date.getFullYear() <= 2100) {
+      return date.toISOString();
+    }
+  }
+
+  // Clean trailing commas or redundant spaces (e.g. "16/10/2024, 15:30:00")
+  str = str.replace(/,\s*/g, ' ').replace(/\s+/g, ' ').trim();
+
+  const nowLimit = new Date(Date.now() + 24 * 60 * 60 * 1000); // 24-hour buffer for timezones
+
+  // 2. Handle DD/MM/YYYY or MM/DD/YYYY with optional time and AM/PM
+  const dmyMatch = str.match(/^(\d{1,2})[\/\-\.](\d{1,2})[\/\-\.](\d{4})(?:\s+(\d{1,2}):(\d{1,2})(?::(\d{1,2}))?(?:\s*(AM|PM))?)?/i);
+  if (dmyMatch) {
+    const p1 = parseInt(dmyMatch[1], 10);
+    const p2 = parseInt(dmyMatch[2], 10);
+    const year = parseInt(dmyMatch[3], 10);
+    let hour = dmyMatch[4] ? parseInt(dmyMatch[4], 10) : 12;
+    const min = dmyMatch[5] ? parseInt(dmyMatch[5], 10) : 0;
+    const sec = dmyMatch[6] ? parseInt(dmyMatch[6], 10) : 0;
+    const ampm = dmyMatch[7] ? dmyMatch[7].toUpperCase() : null;
+
+    if (ampm === 'PM' && hour < 12) hour += 12;
+    if (ampm === 'AM' && hour === 12) hour = 0;
+
+    let day = p1;
+    let month = p2 - 1;
+    if (p1 > 12 && p2 <= 12) {
+      // Must be DD/MM/YYYY
+      day = p1;
+      month = p2 - 1;
+    } else if (p2 > 12 && p1 <= 12) {
+      // Must be MM/DD/YYYY
+      month = p1 - 1;
+      day = p2;
+    } else {
+      // Standard international format default in recruitment (India / Gulf / UK): DD/MM/YYYY
+      day = p1;
+      month = p2 - 1;
+    }
+
+    let parsed = new Date(Date.UTC(year, month, day, hour, min, sec));
+    // If parsed date is in the future (> nowLimit) and swapping produces a valid past date, swap them
+    if (parsed > nowLimit && p2 <= 12 && p1 <= 12) {
+      const alt = new Date(Date.UTC(year, p1 - 1, p2, hour, min, sec));
+      if (!isNaN(alt.getTime()) && alt <= nowLimit) {
+        parsed = alt;
+      }
+    }
+
+    if (!isNaN(parsed.getTime()) && parsed.getUTCFullYear() >= 1990 && parsed.getUTCFullYear() <= 2100) {
+      return parsed.toISOString();
+    }
+  }
+
+  // 3. Handle YYYY/MM/DD, YYYY-MM-DD or full ISO strings
+  const ymdMatch = str.match(/^(\d{4})[\/\-\.](\d{1,2})[\/\-\.](\d{1,2})(?:[T\s](\d{1,2}):(\d{1,2})(?::(\d{1,2}))?)?/i);
+  if (ymdMatch) {
+    const year = parseInt(ymdMatch[1], 10);
+    let month = parseInt(ymdMatch[2], 10) - 1;
+    let day = parseInt(ymdMatch[3], 10);
+    let hour = ymdMatch[4] ? parseInt(ymdMatch[4], 10) : 12;
+    let min = ymdMatch[5] ? parseInt(ymdMatch[5], 10) : 0;
+    let sec = ymdMatch[6] ? parseInt(ymdMatch[6], 10) : 0;
+
+    let parsed = new Date(Date.UTC(year, month, day, hour, min, sec));
+    // Automatic correction for previously stored inverted ISO timestamps (e.g. 2026-12-10 when today is Oct 19, 2026)
+    if (parsed > nowLimit && (month + 1) <= 12 && day <= 12) {
+      const swapped = new Date(Date.UTC(year, day - 1, month + 1, hour, min, sec));
+      if (!isNaN(swapped.getTime()) && swapped <= nowLimit) {
+        parsed = swapped;
+      }
+    }
+
+    if (!isNaN(parsed.getTime()) && parsed.getUTCFullYear() >= 1990 && parsed.getUTCFullYear() <= 2100) {
+      return parsed.toISOString();
+    }
+  }
+
+  // 4. Fallback to direct JavaScript Date parsing if valid year
+  const directDate = new Date(str);
+  if (!isNaN(directDate.getTime()) && directDate.getFullYear() >= 1990 && directDate.getFullYear() <= 2100) {
+    if (directDate > nowLimit) {
+      // Check if swapping month & day fixes future date
+      const swapped = new Date(Date.UTC(directDate.getUTCFullYear(), directDate.getUTCDate() - 1, directDate.getUTCMonth() + 1, directDate.getUTCHours(), directDate.getUTCMinutes(), directDate.getUTCSeconds()));
+      if (!isNaN(swapped.getTime()) && swapped <= nowLimit) {
+        return swapped.toISOString();
+      }
+    }
+    return directDate.toISOString();
+  }
+
+  return fallbackToNow ? new Date().toISOString() : '';
+}
+
+/**
+ * Safely converts any timestamp (DD/MM/YYYY, ISO, raw string, Date) into milliseconds.
+ * Always returns a valid number (0 instead of NaN), ensuring robust sorting and comparisons.
+ */
+export function getValidTimestampMs(rawDate: any): number {
+  if (!rawDate) return 0;
+  if (rawDate instanceof Date) {
+    return isNaN(rawDate.getTime()) ? 0 : rawDate.getTime();
+  }
+  const norm = parseAndNormalizeTimestamp(rawDate, false);
+  if (norm) {
+    const d = new Date(norm);
+    if (!isNaN(d.getTime())) return d.getTime();
+  }
+  const direct = new Date(String(rawDate).trim());
+  return isNaN(direct.getTime()) ? 0 : direct.getTime();
+}
+
+/**
+ * Robustly inspects an external sheet data row to locate and extract its genuine submission date.
+ */
+export function extractSubmissionDateFromRow(
+  headers: string[],
+  row: string[],
+  mapping?: Record<number, string>
+): string {
+  // 1. Explicitly mapped 'timestamp' column
+  if (mapping) {
+    for (const [colIdxStr, target] of Object.entries(mapping)) {
+      if (target === 'timestamp') {
+        const colIdx = parseInt(colIdxStr, 10);
+        if (row[colIdx]) {
+          const parsed = parseAndNormalizeTimestamp(row[colIdx], false);
+          if (parsed) return parsed;
+        }
+      }
+    }
+  }
+
+  // 2. Header matching timestamp keywords
+  for (let i = 0; i < headers.length; i++) {
+    const h = (headers[i] || '').trim();
+    if (/timestamp|time.*stamp|submission.*date|date.*submission|submitted|created.*at|created.*date|entry.*date|applied.*date|record.*date|^date$/i.test(h)) {
+      if (row[i]) {
+        const parsed = parseAndNormalizeTimestamp(row[i], false);
+        if (parsed) return parsed;
+      }
+    }
+  }
+
+  // 3. Fallback: Scan row for any cell that has a valid date string
+  for (let i = 0; i < row.length; i++) {
+    const val = (row[i] || '').trim();
+    if (val && val.length >= 8 && val.length <= 40) {
+      if (/[\/\-\.]/.test(val) && /\d{4}|\d{2}/.test(val)) {
+        const parsed = parseAndNormalizeTimestamp(val, false);
+        if (parsed) return parsed;
+      }
+    }
+  }
+
+  return '';
+}
+
+/**
+ * Checks whether a given timestamp falls on "Today" (matching either UTC or local timezone).
+ */
+export function isTodaySubmission(timestamp: string | undefined | null): boolean {
+  if (!timestamp) return false;
+  const now = new Date();
+  const utcToday = now.toISOString().slice(0, 10);
+  const localToday = now.toLocaleDateString('en-CA'); // YYYY-MM-DD format in local time
+
+  const normIso = parseAndNormalizeTimestamp(timestamp, false);
+  if (!normIso) return false;
+  const subUtc = normIso.slice(0, 10);
+  const subDateObj = new Date(normIso);
+  const subLocal = isNaN(subDateObj.getTime()) ? '' : subDateObj.toLocaleDateString('en-CA');
+
+  return (
+    subUtc === utcToday ||
+    subLocal === localToday ||
+    subUtc === localToday ||
+    subLocal === utcToday
+  );
+}
+
+/**
+ * Checks whether a given timestamp falls on "Yesterday" (matching either UTC or local timezone).
+ */
+export function isYesterdaySubmission(timestamp: string | undefined | null): boolean {
+  if (!timestamp) return false;
+  const yesterday = new Date(Date.now() - 24 * 60 * 60 * 1000);
+  const yestUtc = yesterday.toISOString().slice(0, 10);
+  const yestLocal = yesterday.toLocaleDateString('en-CA');
+
+  const normIso = parseAndNormalizeTimestamp(timestamp, false);
+  if (!normIso) return false;
+  const subUtc = normIso.slice(0, 10);
+  const subDateObj = new Date(normIso);
+  const subLocal = isNaN(subDateObj.getTime()) ? '' : subDateObj.toLocaleDateString('en-CA');
+
+  return (
+    subUtc === yestUtc ||
+    subLocal === yestLocal ||
+    subUtc === yestLocal ||
+    subLocal === yestUtc
+  );
 }

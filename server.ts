@@ -2,10 +2,10 @@ import express from "express";
 import path from "path";
 import fs from "fs";
 import { createServer as createViteServer } from "vite";
-import { parseCsvText } from "./src/utils/csvParser.ts";
+import { parseCsvText, parseAndNormalizeTimestamp, getValidTimestampMs } from "./src/utils/csvParser.ts";
 
 const app = express();
-const PORT = process.env.PORT ? parseInt(process.env.PORT, 10) : 3000;
+const PORT = 3000;
 
 app.use(express.json({ limit: "50mb" }));
 app.use(express.urlencoded({ extended: true, limit: "50mb" }));
@@ -281,9 +281,20 @@ function deduplicateServerSubmissions(subs: any[]): any[] {
       const mergedDynamic = { ...(ex.dynamicAnswers || {}), ...(raw.dynamicAnswers || {}) };
       const mergedAnswers = { ...(ex.answers || {}), ...(raw.answers || {}) };
 
-      const tsEx = new Date(ex.timestamp).getTime() || 0;
-      const tsRaw = new Date(raw.timestamp).getTime() || 0;
-      const bestTimestamp = tsRaw >= tsEx ? raw.timestamp : ex.timestamp;
+      const tsEx = getValidTimestampMs(ex.timestamp);
+      const tsRaw = getValidTimestampMs(raw.timestamp);
+      const normRaw = parseAndNormalizeTimestamp(raw.timestamp, false) || raw.timestamp;
+      const normEx = parseAndNormalizeTimestamp(ex.timestamp, false) || ex.timestamp;
+
+      const nowLimit = Date.now() + 24 * 60 * 60 * 1000;
+      let bestTimestamp = normRaw || normEx || new Date().toISOString();
+      if (tsRaw > nowLimit && tsEx <= nowLimit && tsEx > 0) {
+        bestTimestamp = normEx;
+      } else if (tsEx > nowLimit && tsRaw <= nowLimit && tsRaw > 0) {
+        bestTimestamp = normRaw;
+      } else {
+        bestTimestamp = tsRaw >= tsEx ? (normRaw || normEx) : (normEx || normRaw);
+      }
 
       const bestId = ex.id && !ex.id.startsWith('sub-raw') && !ex.id.startsWith('sub-gas') ? ex.id : (raw.id || ex.id);
 
@@ -309,10 +320,11 @@ function deduplicateServerSubmissions(subs: any[]): any[] {
         answers: mergedAnswers
       };
     } else {
+      const normTs = parseAndNormalizeTimestamp(raw.timestamp, false) || raw.timestamp;
       consolidated.push({
         ...raw,
         id: raw.id || `sub-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`,
-        timestamp: raw.timestamp || new Date().toISOString(),
+        timestamp: normTs || new Date().toISOString(),
         project: projName,
         jobRole: jobRoleStr,
         recruiter: raw.recruiter || 'Recruiter',
@@ -332,7 +344,7 @@ function deduplicateServerSubmissions(subs: any[]): any[] {
     }
   }
 
-  consolidated.sort((a, b) => new Date(b.timestamp).getTime() - new Date(a.timestamp).getTime());
+  consolidated.sort((a, b) => getValidTimestampMs(b.timestamp) - getValidTimestampMs(a.timestamp));
   return consolidated;
 }
 
@@ -690,9 +702,10 @@ app.post("/api/fetch-sheet", async (req, res) => {
 
     const cleanUrl = sheetUrl.trim();
     const pubMatch = cleanUrl.match(/\/spreadsheets\/d\/e\/([a-zA-Z0-9-_]+)/);
-    const standardMatch = cleanUrl.match(/\/spreadsheets\/(?:u\/\d+\/)?d\/(?!e\/)([a-zA-Z0-9-_]+)/);
+    const standardMatch = cleanUrl.match(/(?:\/spreadsheets\/(?:u\/\d+\/)?d\/(?!e\/)|\/file\/d\/|[?&]id=|^)([a-zA-Z0-9-_]{20,})/);
     const gidMatch = cleanUrl.match(/[#&?]gid=([0-9]+)/);
-    const gid = gidMatch ? gidMatch[1] : "0";
+    const specificGid = gidMatch ? gidMatch[1] : undefined;
+    const gid = specificGid || "0";
 
     const candidateUrls: string[] = [];
 
@@ -704,20 +717,32 @@ app.post("/api/fetch-sheet", async (req, res) => {
       if (cleanUrl.includes("/pubhtml")) {
         candidateUrls.push(cleanUrl.replace("/pubhtml", "/pub?output=csv"));
       }
+      if (specificGid) {
+        candidateUrls.push(`https://docs.google.com/spreadsheets/d/e/${pubId}/pub?output=csv&gid=${specificGid}`);
+      }
       candidateUrls.push(
-        `https://docs.google.com/spreadsheets/d/e/${pubId}/pub?output=csv&gid=${gid}`,
-        `https://docs.google.com/spreadsheets/d/e/${pubId}/pub?output=csv`
+        `https://docs.google.com/spreadsheets/d/e/${pubId}/pub?output=csv`,
+        `https://docs.google.com/spreadsheets/d/e/${pubId}/pub?output=csv&gid=0`
       );
     } else if (standardMatch && standardMatch[1]) {
       const sheetId = standardMatch[1];
       if (cleanUrl.includes("/export?format=csv")) {
         candidateUrls.push(cleanUrl);
       }
+      // If user provided a specific tab gid, try that first
+      if (specificGid) {
+        candidateUrls.push(
+          `https://docs.google.com/spreadsheets/d/${sheetId}/gviz/tq?tqx=out:csv&gid=${specificGid}`,
+          `https://docs.google.com/spreadsheets/d/${sheetId}/export?format=csv&gid=${specificGid}`
+        );
+      }
+      // Prioritize no-gid GViz (which automatically accesses the first active tab in any spreadsheet!)
       candidateUrls.push(
-        `https://docs.google.com/spreadsheets/d/${sheetId}/export?format=csv&gid=${gid}`,
-        `https://docs.google.com/spreadsheets/d/${sheetId}/gviz/tq?tqx=out:csv&gid=${gid}`,
-        `https://docs.google.com/spreadsheets/d/${sheetId}/pub?output=csv&gid=${gid}`,
-        `https://docs.google.com/spreadsheets/d/${sheetId}/export?format=csv`
+        `https://docs.google.com/spreadsheets/d/${sheetId}/gviz/tq?tqx=out:csv`,
+        `https://docs.google.com/spreadsheets/d/${sheetId}/export?format=csv`,
+        `https://docs.google.com/spreadsheets/d/${sheetId}/pub?output=csv`,
+        `https://docs.google.com/spreadsheets/d/${sheetId}/gviz/tq?tqx=out:csv&gid=0`,
+        `https://docs.google.com/spreadsheets/d/${sheetId}/export?format=csv&gid=0`
       );
     } else if (cleanUrl.startsWith("http://") || cleanUrl.startsWith("https://")) {
       candidateUrls.push(cleanUrl);

@@ -21,16 +21,21 @@ import {
   Sparkles,
   Layers,
   Search,
-  ExternalLink
+  ExternalLink,
+  Calendar
 } from 'lucide-react';
 import { Project, CandidateSubmission, ProjectField } from '../types';
 import { apiService } from '../services/apiService';
+import { formatDisplayDate } from '../utils/dateUtils';
 import {
   parseCsvText,
   detectHeaderMapping,
   TARGET_FIELD_OPTIONS,
   TargetFieldType,
-  ParsedSheetData
+  ParsedSheetData,
+  parseAndNormalizeTimestamp,
+  extractSubmissionDateFromRow,
+  isTodaySubmission
 } from '../utils/csvParser';
 
 interface ConnectSheetModalProps {
@@ -122,6 +127,10 @@ export const ConnectSheetModal: React.FC<ConnectSheetModalProps> = ({
         setFetchError('Please paste a Google Sheet link to proceed.');
         return;
       }
+      if (targetUrl.toLowerCase().includes('/forms/')) {
+        setFetchError('You pasted a Google Form URL instead of its linked Spreadsheet. Please open your Google Form, click the "Responses" tab at the top, click the green Google Sheets icon ("View in Sheets"), and copy THAT spreadsheet link here.');
+        return;
+      }
     } else if (inputMethod === 'paste') {
       rawCsvText = pastedCsv.trim();
       if (!rawCsvText) {
@@ -136,11 +145,20 @@ export const ConnectSheetModal: React.FC<ConnectSheetModalProps> = ({
       rawCsvText = pastedCsv;
     }
 
-    // Validate project name
-    const effectiveProject = projectMode === 'new' ? newProjectName.trim() : selectedExistingProject.trim();
+    // Validate project name - if empty, provide a clean default so data fetch is not blocked
+    let effectiveProject = projectMode === 'new' ? newProjectName.trim() : selectedExistingProject.trim();
     if (!effectiveProject) {
-      setFetchError(projectMode === 'new' ? 'Please provide a name for the new project.' : 'Please select an existing project.');
-      return;
+      if (projectMode === 'new') {
+        const autoName = `External Campaign - ${new Date().toLocaleDateString('en-GB')}`;
+        setNewProjectName(autoName);
+        effectiveProject = autoName;
+      } else if (projects.length > 0) {
+        setSelectedExistingProject(projects[0].name);
+        effectiveProject = projects[0].name;
+      } else {
+        setFetchError('Please select or name a project.');
+        return;
+      }
     }
 
     setIsFetching(true);
@@ -283,7 +301,10 @@ export const ConnectSheetModal: React.FC<ConnectSheetModalProps> = ({
         else if (target === 'emailId') cand.emailId = val;
         else if (target === 'jobRole') cand.jobRole = val;
         else if (target === 'recruiter') cand.recruiter = val;
-        else if (target === 'timestamp') cand.timestamp = val;
+        else if (target === 'timestamp') {
+          const parsed = parseAndNormalizeTimestamp(val, false);
+          cand.timestamp = parsed || val;
+        }
         else if (target === 'fileUrl') {
           cand.fileUrl = val;
           cand.directFileUrl = val;
@@ -295,6 +316,12 @@ export const ConnectSheetModal: React.FC<ConnectSheetModalProps> = ({
           cand.dynamicAnswers[fieldLabel] = val;
         }
       });
+
+      // If no explicit timestamp mapping, search row for genuine submission date
+      if (!cand.timestamp) {
+        const foundDate = extractSubmissionDateFromRow(parsedData.headers, row, columnMapping);
+        if (foundDate) cand.timestamp = foundDate;
+      }
 
       if (!cand.jobRole && defaultJobRole) {
         cand.jobRole = defaultJobRole;
@@ -334,9 +361,12 @@ export const ConnectSheetModal: React.FC<ConnectSheetModalProps> = ({
       });
 
       parsedData.rows.forEach((row, rowIdx) => {
+        // Extract genuine submission date from the external sheet row
+        const rowSubmissionDate = extractSubmissionDateFromRow(parsedData.headers, row, columnMapping);
+
         const cand: Partial<CandidateSubmission> = {
           id: `sub-sheet-${Date.now()}-${rowIdx + 1}-${Math.random().toString(36).slice(2, 6)}`,
-          timestamp: new Date().toISOString(),
+          timestamp: rowSubmissionDate || new Date().toISOString(),
           project: effectiveProject,
           recruiter: defaultRecruiter,
           dynamicAnswers: {},
@@ -359,7 +389,12 @@ export const ConnectSheetModal: React.FC<ConnectSheetModalProps> = ({
             extractedRoles.add(val);
           }
           else if (target === 'recruiter') cand.recruiter = val;
-          else if (target === 'timestamp') cand.timestamp = val;
+          else if (target === 'timestamp') {
+            const norm = parseAndNormalizeTimestamp(val, false);
+            if (norm) {
+              cand.timestamp = norm;
+            }
+          }
           else if (target === 'fileUrl') {
             cand.fileUrl = val;
             cand.directFileUrl = val;
@@ -1059,6 +1094,7 @@ export const ConnectSheetModal: React.FC<ConnectSheetModalProps> = ({
                         <th className="py-2.5 px-3">Candidate Name</th>
                         <th className="py-2.5 px-3">Passport Number</th>
                         <th className="py-2.5 px-3">Job Role</th>
+                        <th className="py-2.5 px-3">Submission Date</th>
                         <th className="py-2.5 px-3">Mobile</th>
                         <th className="py-2.5 px-3">Recruiter</th>
                         <th className="py-2.5 px-3">Document / CV</th>
@@ -1076,6 +1112,12 @@ export const ConnectSheetModal: React.FC<ConnectSheetModalProps> = ({
                           </td>
                           <td className="py-2.5 px-3 text-slate-700">
                             {cand.jobRole || <span className="text-slate-400 italic">None</span>}
+                          </td>
+                          <td className="py-2.5 px-3">
+                            <span className="inline-flex items-center gap-1.5 px-2 py-0.5 rounded-md bg-blue-50 text-blue-900 font-mono text-[11px] font-semibold border border-blue-200/60">
+                              <Calendar className="w-3 h-3 text-blue-600 shrink-0" />
+                              <span>{formatDisplayDate(cand.timestamp)}</span>
+                            </span>
                           </td>
                           <td className="py-2.5 px-3 text-slate-600 font-mono text-[11px]">
                             {cand.mobileNumber || '-'}
