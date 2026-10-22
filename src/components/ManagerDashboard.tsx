@@ -39,7 +39,7 @@ import {
   Calendar,
   Clock
 } from 'lucide-react';
-import { Project, CandidateSubmission, RecruiterPerformance, BackendConfig, ProjectField, FieldType, AutoSyncState } from '../types';
+import { Project, CandidateSubmission, RecruiterPerformance, BackendConfig, ProjectField, FieldType, AutoSyncState, ProjectActivityLog, ProjectActivityAction } from '../types';
 import { apiService } from '../services/apiService';
 import { DocPreviewModal } from './DocPreviewModal';
 import { DeleteConfirmModal } from './DeleteConfirmModal';
@@ -139,13 +139,55 @@ export const ManagerDashboard: React.FC<ManagerDashboardProps> = ({
   const [connectSheetInitialProject, setConnectSheetInitialProject] = useState<string | undefined>(undefined);
   const [sheetSuccessBanner, setSheetSuccessBanner] = useState<{ projectName: string; importedCount: number; updatedCount: number } | null>(null);
 
+  // Project Activity Logs State
+  const [activities, setActivities] = useState<ProjectActivityLog[]>(() => apiService.getProjectActivities());
+  const [activityFilter, setActivityFilter] = useState<'all' | ProjectActivityAction>('all');
+  const [activitySearch, setActivitySearch] = useState<string>('');
+
+  const handleClearActivities = () => {
+    if (typeof window !== 'undefined' && !window.confirm('Clear all recent project activity history?')) {
+      return;
+    }
+    apiService.clearProjectActivities();
+    setActivities([]);
+  };
+
+  const filteredActivities = useMemo(() => {
+    return activities.filter(act => {
+      if (activityFilter !== 'all' && act.action !== activityFilter) {
+        return false;
+      }
+      if (activitySearch.trim()) {
+        const q = activitySearch.toLowerCase().trim();
+        const inName = (act.projectName || '').toLowerCase().includes(q);
+        const inDetails = (act.details || '').toLowerCase().includes(q);
+        const inAction = (act.action || '').toLowerCase().includes(q);
+        if (!inName && !inDetails && !inAction) return false;
+      }
+      return true;
+    });
+  }, [activities, activityFilter, activitySearch]);
+
+  const activityCounts = useMemo(() => {
+    return {
+      all: activities.length,
+      created: activities.filter(a => a.action === 'created').length,
+      updated: activities.filter(a => a.action === 'updated').length,
+      imported: activities.filter(a => a.action === 'imported').length,
+      synced: activities.filter(a => a.action === 'synced').length,
+      deleted: activities.filter(a => a.action === 'deleted').length
+    };
+  }, [activities]);
+
   const handleOpenConnectSheet = (projectName?: string) => {
     setConnectSheetInitialProject(projectName);
     setShowConnectSheetModal(true);
   };
 
-  const handleConnectSheetSuccess = (result: { projectName: string; importedCount: number; updatedCount: number }) => {
+  const handleConnectSheetSuccess = async (result: { projectName: string; importedCount: number; updatedCount: number }) => {
     setSheetSuccessBanner(result);
+    setFilterProject(result.projectName);
+    await loadData(false);
     onRefreshData();
     setTimeout(() => {
       setSheetSuccessBanner(null);
@@ -182,6 +224,7 @@ export const ManagerDashboard: React.FC<ManagerDashboardProps> = ({
       // Subscribe to real-time auto-fetch data updates
       const unsubData = apiService.subscribe(() => {
         loadData(false);
+        setActivities(apiService.getProjectActivities());
       });
 
       const unsubSync = apiService.subscribeSyncState((newState) => {
@@ -206,6 +249,7 @@ export const ManagerDashboard: React.FC<ManagerDashboardProps> = ({
       const perf = apiService.getRecruiterPerformance(leaderboardProjectFilter);
       setPerformanceList(perf);
       setConfig(apiService.getConfig());
+      setActivities(apiService.getProjectActivities());
     } finally {
       if (forceRemote) {
         setIsSyncing(false);
@@ -685,42 +729,112 @@ export const ManagerDashboard: React.FC<ManagerDashboardProps> = ({
     }
   };
 
-  // Export to CSV
-  const handleExportCSV = () => {
-    if (filteredSubmissions.length === 0 && submissions.length === 0) {
-      alert('No submissions to export.');
+  // Total Analytics Computations & Project Count Resolvers
+  const allSubsList = allSubmissions.length > 0 ? allSubmissions : submissions;
+  const totalSubmissionsCount = allSubsList.length;
+
+  // Helper to build CSV columns and export matching the project structure
+  const exportCandidatesToCsv = (candidates: CandidateSubmission[], projectName?: string) => {
+    if (candidates.length === 0) {
+      alert('No candidates found to export.');
       return;
     }
 
-    const exportList = filteredSubmissions.length > 0 ? filteredSubmissions : submissions;
-    const headers = ['Timestamp', 'Project', 'Job Role', 'Recruiter', 'Candidate Name', 'Passport Number', 'Mobile Number', 'Alt Mobile Number', 'Email ID', 'Remarks', 'Document URL'];
-    const rows = exportList.map(s => [
-      formatDisplayDateTime(s.timestamp),
-      `"${s.project}"`,
-      `"${s.jobRole || apiService.getEffectiveJobRole(s) || ''}"`,
-      `"${s.recruiter}"`,
-      `"${s.candidateName}"`,
-      `"${s.passportNumber}"`,
-      `"${s.mobileNumber || ''}"`,
-      `"${s.altMobileNumber || apiService.getEffectiveAltMobile(s) || ''}"`,
-      `"${s.emailId || apiService.getEffectiveEmail(s) || ''}"`,
-      `"${(s.remarks || '').replace(/"/g, '""')}"`,
-      `"${s.fileUrl || ''}"`
-    ]);
+    const targetProj = projectName && projectName !== 'All Projects'
+      ? projects.find(p => apiService.isProjectMatch(p.name, projectName))
+      : null;
 
-    const csvContent = 'data:text/csv;charset=utf-8,' + [headers.join(','), ...rows.map(r => r.join(','))].join('\n');
+    // Collect custom questions/fields matching project created on this site
+    const customLabels: string[] = [];
+    if (targetProj && Array.isArray(targetProj.fields)) {
+      targetProj.fields.forEach(f => {
+        if (f && f.label && !customLabels.includes(f.label)) customLabels.push(f.label);
+      });
+    }
+
+    // Also include any extra custom answer keys present in candidate records
+    candidates.forEach(s => {
+      if (s.dynamicAnswers && typeof s.dynamicAnswers === 'object') {
+        Object.keys(s.dynamicAnswers).forEach(k => {
+          if (!customLabels.includes(k) && !/passport|mobile|phone|role|trade|remarks|email/i.test(k)) {
+            customLabels.push(k);
+          }
+        });
+      }
+    });
+
+    const headers = [
+      'Timestamp',
+      'Project',
+      'Job Role',
+      'Recruiter',
+      'Candidate Name',
+      'Passport Number',
+      'Mobile Number',
+      'Alt Mobile Number',
+      'Email ID',
+      ...customLabels,
+      'Remarks',
+      'Document URL'
+    ];
+
+    const rows = candidates.map(s => {
+      const dynamicCells = customLabels.map(label => {
+        const val = (s.dynamicAnswers && s.dynamicAnswers[label] !== undefined)
+          ? String(s.dynamicAnswers[label])
+          : '';
+        return `"${val.replace(/"/g, '""')}"`;
+      });
+
+      return [
+        formatDisplayDateTime(s.timestamp),
+        `"${s.project}"`,
+        `"${s.jobRole || apiService.getEffectiveJobRole(s) || ''}"`,
+        `"${s.recruiter}"`,
+        `"${s.candidateName}"`,
+        `"${s.passportNumber}"`,
+        `"${s.mobileNumber || ''}"`,
+        `"${s.altMobileNumber || apiService.getEffectiveAltMobile(s) || ''}"`,
+        `"${s.emailId || apiService.getEffectiveEmail(s) || ''}"`,
+        ...dynamicCells,
+        `"${(s.remarks || '').replace(/"/g, '""')}"`,
+        `"${s.fileUrl || ''}"`
+      ];
+    });
+
+    const csvContent = 'data:text/csv;charset=utf-8,\uFEFF' + [headers.join(','), ...rows.map(r => r.join(','))].join('\n');
     const encodedUri = encodeURI(csvContent);
     const link = document.createElement('a');
     link.setAttribute('href', encodedUri);
-    link.setAttribute('download', `Candidate_Submissions_Export_${new Date().toISOString().slice(0, 10)}.csv`);
+    const dateStr = new Date().toISOString().slice(0, 10);
+    const safeName = targetProj
+      ? targetProj.name.replace(/[^a-zA-Z0-9_\- ]/g, '').trim().replace(/\s+/g, '_')
+      : (projectName && projectName !== 'All Projects' ? projectName.replace(/[^a-zA-Z0-9_\- ]/g, '').trim().replace(/\s+/g, '_') : 'All_Projects');
+    link.setAttribute('download', `${safeName}_Candidates_${dateStr}.csv`);
     document.body.appendChild(link);
     link.click();
     document.body.removeChild(link);
   };
 
-  // Total Analytics Computations & Project Count Resolvers
-  const allSubsList = allSubmissions.length > 0 ? allSubmissions : submissions;
-  const totalSubmissionsCount = allSubsList.length;
+  // Export to CSV from Submissions Explorer toolbar
+  const handleExportCSV = () => {
+    if (filteredSubmissions.length === 0 && submissions.length === 0) {
+      alert('No submissions to export.');
+      return;
+    }
+    const exportList = filteredSubmissions.length > 0 ? filteredSubmissions : submissions;
+    exportCandidatesToCsv(exportList, filterProject);
+  };
+
+  // Export candidate submissions directly per project card in Project Builder
+  const handleExportProjectCSV = (proj: Project) => {
+    const projSubs = allSubsList.filter(s => apiService.isProjectMatch(s.project, proj.name));
+    if (projSubs.length === 0) {
+      alert(`No candidates recorded yet for project "${proj.name}".`);
+      return;
+    }
+    exportCandidatesToCsv(projSubs, proj.name);
+  };
   const now = new Date();
   const todayStr = now.toISOString().slice(0, 10);
   const yesterday = new Date(now.getTime() - 24 * 60 * 60 * 1000);
@@ -1670,6 +1784,14 @@ export const ManagerDashboard: React.FC<ManagerDashboardProps> = ({
                                 </button>
                               )}
                               <button
+                                onClick={() => handleExportProjectCSV(proj)}
+                                className="px-2.5 py-1 bg-slate-800 hover:bg-slate-700 text-slate-200 border border-slate-700 rounded-lg text-xs font-medium transition-colors cursor-pointer flex items-center gap-1"
+                                title={`Export CSV for ${proj.name}`}
+                              >
+                                <Download className="w-3 h-3 text-slate-300" />
+                                <span>Export</span>
+                              </button>
+                              <button
                                 onClick={() => handleOpenConnectSheet(proj.name)}
                                 className="px-2.5 py-1 bg-emerald-950/80 hover:bg-emerald-900 text-emerald-300 hover:text-emerald-200 border border-emerald-700/60 rounded-lg text-xs font-medium transition-colors cursor-pointer"
                                 title="Import or connect external Google Sheet for this project"
@@ -1849,6 +1971,14 @@ export const ManagerDashboard: React.FC<ManagerDashboardProps> = ({
                         </button>
                       )}
                       <button
+                        onClick={() => handleExportProjectCSV(proj)}
+                        className="px-2.5 py-1.5 bg-slate-100 hover:bg-slate-200 text-slate-700 hover:text-slate-900 border border-slate-200 rounded-lg text-xs font-bold transition-colors cursor-pointer flex items-center gap-1.5"
+                        title={`Export CSV sheet for ${proj.name} matching configured questions`}
+                      >
+                        <Download className="w-3.5 h-3.5 text-slate-500" />
+                        <span>Export CSV</span>
+                      </button>
+                      <button
                         onClick={() => setPreviewProject(proj)}
                         className="px-3 py-1.5 bg-blue-50 hover:bg-blue-100 text-blue-700 rounded-lg text-xs font-bold transition-colors cursor-pointer flex items-center gap-1"
                         title="Preview how recruiters see this project's form"
@@ -1876,6 +2006,241 @@ export const ManagerDashboard: React.FC<ManagerDashboardProps> = ({
               ))}
             </div>
           )}
+
+          {/* ── RECENT PROJECT ACTIVITY LOGS ── */}
+          <div className="bg-white rounded-3xl border border-slate-200 shadow-xs p-6 space-y-5">
+            <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-4 pb-2 border-b border-slate-100">
+              <div className="flex items-center gap-3">
+                <div className="w-10 h-10 rounded-2xl bg-blue-50 text-blue-600 flex items-center justify-center shrink-0">
+                  <Activity className="w-5 h-5" />
+                </div>
+                <div>
+                  <div className="flex items-center gap-2">
+                    <h3 className="text-base font-extrabold text-slate-900">Recent Project Activity</h3>
+                    <span className="inline-flex items-center gap-1.5 px-2.5 py-0.5 rounded-full text-[10px] font-bold bg-emerald-50 text-emerald-700 border border-emerald-200">
+                      <span className="relative flex h-2 w-2">
+                        <span className="animate-ping absolute inline-flex h-full w-full rounded-full bg-emerald-400 opacity-75"></span>
+                        <span className="relative inline-flex rounded-full h-2 w-2 bg-emerald-500"></span>
+                      </span>
+                      Live Tracking
+                    </span>
+                  </div>
+                  <p className="text-xs text-slate-500 mt-0.5">Real-time audit log of project creation, updates, and Google Sheet imports</p>
+                </div>
+              </div>
+
+              <div className="flex items-center gap-2">
+                <div className="relative">
+                  <Search className="w-3.5 h-3.5 absolute left-3 top-1/2 -translate-y-1/2 text-slate-400" />
+                  <input
+                    type="text"
+                    placeholder="Search activity..."
+                    value={activitySearch}
+                    onChange={(e) => setActivitySearch(e.target.value)}
+                    className="pl-8 pr-8 py-1.5 bg-slate-50 border border-slate-200 rounded-xl text-xs font-medium text-slate-800 placeholder-slate-400 focus:outline-hidden focus:ring-2 focus:ring-blue-500 w-36 sm:w-48"
+                  />
+                  {activitySearch && (
+                    <button
+                      type="button"
+                      onClick={() => setActivitySearch('')}
+                      className="absolute right-2.5 top-1/2 -translate-y-1/2 text-slate-400 hover:text-slate-600 cursor-pointer"
+                    >
+                      <X className="w-3 h-3" />
+                    </button>
+                  )}
+                </div>
+
+                <button
+                  type="button"
+                  onClick={() => setActivities(apiService.getProjectActivities())}
+                  className="p-2 text-slate-600 hover:text-slate-900 hover:bg-slate-100 rounded-xl border border-slate-200 transition-colors cursor-pointer"
+                  title="Refresh activity logs"
+                >
+                  <RefreshCw className="w-3.5 h-3.5" />
+                </button>
+
+                {activities.length > 0 && (
+                  <button
+                    type="button"
+                    onClick={handleClearActivities}
+                    className="p-2 text-slate-400 hover:text-rose-600 hover:bg-rose-50 rounded-xl border border-slate-200 transition-colors cursor-pointer"
+                    title="Clear activity history"
+                  >
+                    <Trash2 className="w-3.5 h-3.5" />
+                  </button>
+                )}
+              </div>
+            </div>
+
+            {/* Filter Pills */}
+            <div className="flex flex-wrap items-center gap-1.5">
+              {[
+                { id: 'all', label: 'All Events', count: activityCounts.all },
+                { id: 'created', label: 'Created', count: activityCounts.created },
+                { id: 'updated', label: 'Updated', count: activityCounts.updated },
+                { id: 'imported', label: 'Imported from Sheet', count: activityCounts.imported },
+                { id: 'synced', label: 'Synced', count: activityCounts.synced },
+                { id: 'deleted', label: 'Deleted', count: activityCounts.deleted }
+              ].map(f => (
+                <button
+                  key={f.id}
+                  type="button"
+                  onClick={() => setActivityFilter(f.id as any)}
+                  className={`px-3 py-1.5 rounded-xl text-xs font-bold transition-all cursor-pointer flex items-center gap-1.5 ${
+                    activityFilter === f.id
+                      ? 'bg-slate-900 text-white shadow-xs'
+                      : 'bg-slate-100 text-slate-600 hover:bg-slate-200'
+                  }`}
+                >
+                  <span>{f.label}</span>
+                  <span className={`px-1.5 py-0.5 rounded-md text-[10px] font-mono ${
+                    activityFilter === f.id ? 'bg-slate-800 text-white' : 'bg-slate-200 text-slate-700'
+                  }`}>
+                    {f.count}
+                  </span>
+                </button>
+              ))}
+            </div>
+
+            {/* Activity Stream */}
+            {filteredActivities.length === 0 ? (
+              <div className="p-8 text-center rounded-2xl bg-slate-50 border border-slate-100 space-y-2">
+                <Clock className="w-8 h-8 text-slate-400 mx-auto" />
+                <p className="text-xs font-bold text-slate-700">No project activity found</p>
+                <p className="text-[11px] text-slate-500">
+                  {activitySearch || activityFilter !== 'all'
+                    ? 'No events match your current filter or search criteria.'
+                    : 'New activities will appear automatically when projects are created, edited, or imported.'}
+                </p>
+              </div>
+            ) : (
+              <div className="space-y-3 max-h-[460px] overflow-y-auto pr-1">
+                {filteredActivities.map((act) => {
+                  const getActionBadge = () => {
+                    switch (act.action) {
+                      case 'created':
+                        return {
+                          bg: 'bg-emerald-50 text-emerald-700 border-emerald-200',
+                          icon: <Plus className="w-3.5 h-3.5" />,
+                          label: 'Created'
+                        };
+                      case 'updated':
+                        return {
+                          bg: 'bg-blue-50 text-blue-700 border-blue-200',
+                          icon: <FolderKanban className="w-3.5 h-3.5" />,
+                          label: 'Updated'
+                        };
+                      case 'imported':
+                        return {
+                          bg: 'bg-purple-50 text-purple-700 border-purple-200',
+                          icon: <FileSpreadsheet className="w-3.5 h-3.5" />,
+                          label: 'Imported from Sheet'
+                        };
+                      case 'synced':
+                        return {
+                          bg: 'bg-teal-50 text-teal-700 border-teal-200',
+                          icon: <RefreshCw className="w-3.5 h-3.5" />,
+                          label: 'Synced'
+                        };
+                      case 'deleted':
+                        return {
+                          bg: 'bg-rose-50 text-rose-700 border-rose-200',
+                          icon: <Trash2 className="w-3.5 h-3.5" />,
+                          label: 'Deleted'
+                        };
+                      default:
+                        return {
+                          bg: 'bg-slate-50 text-slate-700 border-slate-200',
+                          icon: <Activity className="w-3.5 h-3.5" />,
+                          label: act.action
+                        };
+                    }
+                  };
+
+                  const badge = getActionBadge();
+
+                  return (
+                    <div
+                      key={act.id}
+                      className="p-4 rounded-2xl border border-slate-100 hover:border-slate-200 bg-slate-50/50 hover:bg-slate-50 transition-all flex flex-col sm:flex-row sm:items-center justify-between gap-3"
+                    >
+                      <div className="flex items-start gap-3 min-w-0">
+                        <div className={`w-8 h-8 rounded-xl border flex items-center justify-center shrink-0 mt-0.5 ${badge.bg}`}>
+                          {badge.icon}
+                        </div>
+
+                        <div className="space-y-1 min-w-0">
+                          <div className="flex flex-wrap items-center gap-2">
+                            <span className="font-extrabold text-sm text-slate-900 truncate">
+                              {act.projectName}
+                            </span>
+                            <span className={`px-2 py-0.5 rounded-md text-[10px] font-bold border uppercase tracking-wider ${badge.bg}`}>
+                              {badge.label}
+                            </span>
+                          </div>
+
+                          <p className="text-xs text-slate-600 leading-relaxed font-medium">
+                            {act.details}
+                          </p>
+
+                          <div className="flex flex-wrap items-center gap-2 text-[11px] text-slate-500 font-medium">
+                            <span className="flex items-center gap-1" title={formatDisplayDateTime(act.timestamp)}>
+                              <Clock className="w-3 h-3 text-slate-400" />
+                              <span>{formatTimeAgo(act.timestamp)}</span>
+                            </span>
+                            <span>•</span>
+                            <span>{formatDisplayDateTime(act.timestamp)}</span>
+                            {act.user && (
+                              <>
+                                <span>•</span>
+                                <span>by {act.user}</span>
+                              </>
+                            )}
+                            {typeof act.importedCount === 'number' && act.importedCount > 0 && (
+                              <>
+                                <span>•</span>
+                                <span className="font-semibold text-emerald-700">+{act.importedCount} candidate{act.importedCount === 1 ? '' : 's'}</span>
+                              </>
+                            )}
+                          </div>
+                        </div>
+                      </div>
+
+                      {/* External links */}
+                      <div className="flex items-center gap-2 shrink-0 self-end sm:self-center pl-11 sm:pl-0">
+                        {act.sheetUrl && (
+                          <a
+                            href={act.sheetUrl}
+                            target="_blank"
+                            rel="noreferrer"
+                            className="inline-flex items-center gap-1 px-2.5 py-1 bg-emerald-50 hover:bg-emerald-100 text-emerald-800 border border-emerald-200 rounded-lg text-xs font-bold transition-colors cursor-pointer"
+                            title="Open Google Sheet"
+                          >
+                            <FileSpreadsheet className="w-3.5 h-3.5 text-emerald-600" />
+                            <span>Sheet</span>
+                            <ExternalLink className="w-3 h-3 text-emerald-500" />
+                          </a>
+                        )}
+                        {act.folderUrl && (
+                          <a
+                            href={act.folderUrl}
+                            target="_blank"
+                            rel="noreferrer"
+                            className="inline-flex items-center gap-1 px-2.5 py-1 bg-blue-50 hover:bg-blue-100 text-blue-800 border border-blue-200 rounded-lg text-xs font-bold transition-colors cursor-pointer"
+                            title="Open Drive Folder"
+                          >
+                            <HardDrive className="w-3.5 h-3.5 text-blue-600" />
+                            <span>Drive</span>
+                            <ExternalLink className="w-3 h-3 text-blue-500" />
+                          </a>
+                        )}
+                      </div>
+                    </div>
+                  );
+                })}
+              </div>
+            )}
+          </div>
 
         </div>
       )}

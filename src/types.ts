@@ -78,3 +78,18 @@ export interface ConnectionStatus {
   lastChecked: string;
   message?: string;
 }
+
+export type ProjectActivityAction = 'created' | 'updated' | 'imported' | 'synced' | 'deleted';
+
+export interface ProjectActivityLog {
+  id: string;
+  timestamp: string; // ISO string
+  projectName: string;
+  action: ProjectActivityAction;
+  details: string;
+  sheetUrl?: string;
+  folderUrl?: string;
+  importedCount?: number;
+  updatedCount?: number;
+  user?: string;
+}

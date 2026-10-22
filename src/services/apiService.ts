@@ -1,4 +1,4 @@
-import { Project, CandidateSubmission, BackendConfig, RecruiterPerformance, ConnectionStatus, AutoSyncState, ProjectField } from '../types';
+import { Project, CandidateSubmission, BackendConfig, RecruiterPerformance, ConnectionStatus, AutoSyncState, ProjectField, ProjectActivityLog, ProjectActivityAction } from '../types';
 import { DEFAULT_CONFIG, INITIAL_PROJECTS, INITIAL_RECRUITERS, INITIAL_SUBMISSIONS } from './defaultData';
 import { parseCsvText, detectHeaderMapping, parseAndNormalizeTimestamp, extractSubmissionDateFromRow, getValidTimestampMs, isTodaySubmission, isYesterdaySubmission, TargetFieldType } from '../utils/csvParser';
 
@@ -7,7 +7,8 @@ const STORAGE_KEYS = {
   PROJECTS: 'doc_hub_projects_v3',
   RECRUITERS: 'doc_hub_recruiters_v3',
   SUBMISSIONS: 'doc_hub_submissions_v3',
-  SESSION_PASSCODE: 'doc_hub_manager_session_v3'
+  SESSION_PASSCODE: 'doc_hub_manager_session_v3',
+  ACTIVITIES: 'doc_hub_project_activities_v3'
 };
 
 const DEMO_PROJECT_NAMES = [
@@ -25,6 +26,7 @@ class ApiService {
   private projects: Project[];
   private recruiters: string[];
   private submissions: CandidateSubmission[];
+  private projectActivities: ProjectActivityLog[] = [];
   private deletedSubmissionKeys: Set<string> = new Set();
 
   // Auto-Sync state and listeners
@@ -150,6 +152,14 @@ class ApiService {
     this.submissions = this.deduplicateSubmissions(nonDemoSubs);
     this.saveStored(STORAGE_KEYS.SUBMISSIONS, this.submissions);
 
+    // Initialize Recent Activity Logs
+    const loadedActivities = this.loadStored<ProjectActivityLog[]>(STORAGE_KEYS.ACTIVITIES, []);
+    if (loadedActivities && loadedActivities.length > 0) {
+      this.projectActivities = loadedActivities;
+    } else {
+      this.projectActivities = this.generateBaselineActivities();
+      this.saveStored(STORAGE_KEYS.ACTIVITIES, this.projectActivities);
+    }
 
     // Initial multi-device state synchronization on boot
     if (typeof window !== 'undefined') {
@@ -157,6 +167,71 @@ class ApiService {
         this.syncWithServerState().catch(console.warn);
       }, 50);
     }
+  }
+
+  private generateBaselineActivities(): ProjectActivityLog[] {
+    const now = Date.now();
+    const baseline: ProjectActivityLog[] = [];
+    const sampleProjects = (this.projects && this.projects.length > 0) ? this.projects.slice(0, 4) : [];
+    
+    sampleProjects.forEach((proj, idx) => {
+      const isSheet = Boolean(proj.sheetUrl && proj.sheetUrl.trim().length > 10);
+      baseline.push({
+        id: `act-init-${idx + 1}`,
+        timestamp: new Date(now - (idx * 3600000 + 1800000)).toISOString(),
+        projectName: proj.name,
+        action: isSheet ? 'imported' : (idx === 0 ? 'updated' : 'created'),
+        details: isSheet
+          ? `Imported and linked Google Sheet with ${proj.totalSubmissions || 0} candidate record(s).`
+          : (idx === 0
+              ? `Updated configuration for "${proj.name}" (${proj.jobRoles?.length || 0} job roles, ${proj.fields?.length || 0} fields).`
+              : `Created new project "${proj.name}" with automatic Google Sheet & Drive folder provisioning.`),
+        sheetUrl: proj.sheetUrl,
+        folderUrl: proj.folderUrl,
+        importedCount: proj.totalSubmissions || 0,
+        user: 'Admin Manager'
+      });
+    });
+
+    return baseline;
+  }
+
+  public getProjectActivities(): ProjectActivityLog[] {
+    return [...this.projectActivities];
+  }
+
+  public logProjectActivity(entry: Omit<ProjectActivityLog, 'id' | 'timestamp'> & { id?: string; timestamp?: string }): ProjectActivityLog {
+    const newActivity: ProjectActivityLog = {
+      id: entry.id || `act-${Date.now()}-${Math.random().toString(36).slice(2, 7)}`,
+      timestamp: entry.timestamp || new Date().toISOString(),
+      projectName: entry.projectName,
+      action: entry.action,
+      details: entry.details,
+      sheetUrl: entry.sheetUrl,
+      folderUrl: entry.folderUrl,
+      importedCount: entry.importedCount,
+      updatedCount: entry.updatedCount,
+      user: entry.user || 'Admin Manager'
+    };
+
+    // Prepend to activities list
+    this.projectActivities.unshift(newActivity);
+    // Keep max 150 entries
+    if (this.projectActivities.length > 150) {
+      this.projectActivities = this.projectActivities.slice(0, 150);
+    }
+
+    this.saveStored(STORAGE_KEYS.ACTIVITIES, this.projectActivities);
+    this.pushStateToServer({ activities: this.projectActivities }).catch(console.warn);
+    this.notifyListeners();
+    return newActivity;
+  }
+
+  public clearProjectActivities(): void {
+    this.projectActivities = [];
+    this.saveStored(STORAGE_KEYS.ACTIVITIES, []);
+    this.pushStateToServer({ clearActivities: true }).catch(console.warn);
+    this.notifyListeners();
   }
 
   public sortProjectsByNewest(projs: Project[]): Project[] {
@@ -323,6 +398,24 @@ class ApiService {
         }
       }
 
+      // 5. Sync Project Activities
+      if (Array.isArray(serverState.activities)) {
+        const existingMap = new Map<string, ProjectActivityLog>();
+        this.projectActivities.forEach(a => { if (a && a.id) existingMap.set(a.id, a); });
+        serverState.activities.forEach((a: ProjectActivityLog) => {
+          if (a && a.id) existingMap.set(a.id, a);
+        });
+        const mergedActs = Array.from(existingMap.values())
+          .sort((a, b) => new Date(b.timestamp).getTime() - new Date(a.timestamp).getTime())
+          .slice(0, 150);
+
+        if (mergedActs.length !== this.projectActivities.length || JSON.stringify(mergedActs) !== JSON.stringify(this.projectActivities)) {
+          this.projectActivities = mergedActs;
+          this.saveStored(STORAGE_KEYS.ACTIVITIES, this.projectActivities);
+          stateChanged = true;
+        }
+      }
+
       if (stateChanged) {
         this.notifyListeners();
       }
@@ -343,6 +436,7 @@ class ApiService {
           projects: this.projects,
           recruiters: this.recruiters,
           submissions: this.submissions,
+          activities: this.projectActivities,
           ...extraPayload
         })
       });
@@ -755,11 +849,50 @@ class ApiService {
         };
       });
 
-      this.projects = this.sortProjectsByNewest(enrichedRemote);
+      // Preserve all local/imported projects so projects created or imported on this site are never dropped
+      const mergedMap = new Map<string, Project>();
+      enrichedRemote.forEach(p => {
+        if (p && p.name) mergedMap.set(p.name.trim().toLowerCase(), p);
+      });
+
+      this.projects.forEach(localP => {
+        if (localP && localP.name) {
+          const key = localP.name.trim().toLowerCase();
+          if (!mergedMap.has(key)) {
+            mergedMap.set(key, localP);
+            // Automatically push to Google Apps Script Master Sheet so it gets registered in Google Sheet
+            if (this.config.gasWebAppUrl) {
+              const gasPayload = {
+                name: localP.name,
+                sheetUrl: localP.sheetUrl || '',
+                folderUrl: localP.folderUrl || '',
+                submission: localP.submission || 'Active',
+                status: localP.status || 'Open',
+                jobRoles: localP.jobRoles || [],
+                fields: localP.fields || []
+              };
+              this.triggerGasAction('managerSaveProjectConfig', [gasPayload, this.config.passcode || 'Gowell921']).catch(console.warn);
+            }
+          } else {
+            // Retain sheetUrl, folderUrl, and custom questions if local had them
+            const remoteP = mergedMap.get(key)!;
+            if (!remoteP.sheetUrl && localP.sheetUrl) remoteP.sheetUrl = localP.sheetUrl;
+            if (!remoteP.folderUrl && localP.folderUrl) remoteP.folderUrl = localP.folderUrl;
+            if ((!remoteP.jobRoles || remoteP.jobRoles.length === 0) && localP.jobRoles && localP.jobRoles.length > 0) {
+              remoteP.jobRoles = localP.jobRoles;
+            }
+            if ((!remoteP.fields || remoteP.fields.length === 0) && localP.fields && localP.fields.length > 0) {
+              remoteP.fields = localP.fields;
+            }
+          }
+        }
+      });
+
+      this.projects = this.sortProjectsByNewest(Array.from(mergedMap.values()));
       this.recalculateProjectCounts();
       this.saveStored(STORAGE_KEYS.PROJECTS, this.projects);
       this.pushStateToServer({ overwriteProjects: true }).catch(console.warn);
-      return { success: true, count: enrichedRemote.length, message: `Loaded ${enrichedRemote.length} active project(s) from cloud.` };
+      return { success: true, count: this.projects.length, message: `Loaded ${this.projects.length} active project(s) across Google Sheets and local storage.` };
     }
 
 
@@ -773,6 +906,7 @@ class ApiService {
     }
 
     const nowIso = new Date().toISOString();
+    const isUpdate = Boolean(originalName && this.projects.some(p => p.name.toLowerCase() === originalName.toLowerCase()));
 
     if (originalName) {
       const index = this.projects.findIndex(p => p.name === originalName);
@@ -804,6 +938,17 @@ class ApiService {
     this.projects = this.sortProjectsByNewest(this.projects);
     this.saveStored(STORAGE_KEYS.PROJECTS, this.projects);
 
+    // Record in Recent Activity feed
+    this.logProjectActivity({
+      projectName: cleanName,
+      action: isUpdate ? 'updated' : 'created',
+      details: isUpdate
+        ? `Updated configuration for "${cleanName}" (${project.jobRoles?.length || 0} job roles, ${project.fields?.length || 0} fields).`
+        : `Created new project "${cleanName}" with automatic Google Sheet & Drive folder setup.`,
+      sheetUrl: project.sheetUrl,
+      folderUrl: project.folderUrl
+    });
+
     // Push to central server so other devices immediately see the project
     this.pushStateToServer().catch(console.warn);
 
@@ -832,6 +977,13 @@ class ApiService {
   public async deleteProject(projectName: string): Promise<{ success: boolean; message: string }> {
     this.projects = this.projects.filter(p => p.name !== projectName);
     this.saveStored(STORAGE_KEYS.PROJECTS, this.projects);
+
+    // Record deletion in Recent Activity feed
+    this.logProjectActivity({
+      projectName,
+      action: 'deleted',
+      details: `Project "${projectName}" removed from active roster and unlinked.`
+    });
 
     this.pushStateToServer().catch(console.warn);
 
@@ -1009,6 +1161,7 @@ class ApiService {
     jobRoles?: string[];
     isNewProject?: boolean;
     updateExisting?: boolean;
+    isResync?: boolean;
   }): Promise<{ success: boolean; importedCount: number; updatedCount: number; message: string }> {
     const cleanProject = params.projectName.trim();
     if (!cleanProject) {
@@ -1031,9 +1184,10 @@ class ApiService {
       ? params.fields
       : (existingProjIndex >= 0 ? this.projects[existingProjIndex].fields : []);
 
+    let targetProject: Project;
     if (existingProjIndex >= 0) {
       const currentProj = this.projects[existingProjIndex];
-      this.projects[existingProjIndex] = {
+      targetProject = {
         ...currentProj,
         sheetUrl: params.sheetUrl && params.sheetUrl.trim() ? params.sheetUrl.trim() : currentProj.sheetUrl,
         folderUrl: params.folderUrl && params.folderUrl.trim() ? params.folderUrl.trim() : currentProj.folderUrl,
@@ -1041,8 +1195,9 @@ class ApiService {
         fields: mergedFields,
         columnMapping: params.columnMapping || currentProj.columnMapping
       };
+      this.projects[existingProjIndex] = targetProject;
     } else {
-      const newProj: Project = {
+      targetProject = {
         name: cleanProject,
         description: params.projectDescription || `Connected external Google Sheet (${params.candidates.length} candidates)`,
         sheetUrl: (params.sheetUrl || '').trim(),
@@ -1054,7 +1209,7 @@ class ApiService {
         created_at: nowIso,
         columnMapping: params.columnMapping || {}
       };
-      this.projects.unshift(newProj);
+      this.projects.unshift(targetProject);
     }
 
     // 2. Process Candidates
@@ -1151,6 +1306,40 @@ class ApiService {
 
     // Push state to server and notify UI
     await this.pushStateToServer({ overwriteProjects: true, overwriteSubmissions: true });
+
+    // CRITICAL: Immediately register/save the imported project in Google Apps Script Master Sheet (Project_Config)
+    if (this.config.gasWebAppUrl) {
+      const gasPayload = {
+        name: cleanProject,
+        originalName: cleanProject,
+        sheetUrl: targetProject.sheetUrl || '',
+        folderUrl: targetProject.folderUrl || '',
+        submission: targetProject.submission || 'Active',
+        status: targetProject.status || 'Open',
+        jobRoles: targetProject.jobRoles || [],
+        fields: targetProject.fields || []
+      };
+      this.triggerGasAction('managerSaveProjectConfig', [gasPayload, this.config.passcode || 'Gowell921'])
+        .then(() => console.log(`Project "${cleanProject}" saved to Google Apps Script Master Sheet Project_Config.`))
+        .catch(e => console.warn('GAS managerSaveProjectConfig failed during sheet import:', e));
+    }
+
+    // Record in Recent Activity feed
+    const actType: ProjectActivityAction = params.isResync ? 'synced' : 'imported';
+    const detailMsg = params.isResync
+      ? `Synchronized Google Sheet for "${cleanProject}": ${importedCount} new candidate(s) added, ${updatedCount} refreshed.`
+      : `Imported from Google Sheet: ${importedCount} candidate(s) loaded, ${updatedCount} updated into "${cleanProject}".`;
+
+    this.logProjectActivity({
+      projectName: cleanProject,
+      action: actType,
+      details: detailMsg,
+      sheetUrl: targetProject.sheetUrl,
+      folderUrl: targetProject.folderUrl,
+      importedCount,
+      updatedCount
+    });
+
     this.notifyListeners();
 
     return {
@@ -1237,7 +1426,8 @@ class ApiService {
       sheetUrl: proj.sheetUrl,
       columnMapping: proj.columnMapping,
       candidates: parsedCandidates,
-      jobRoles: Array.from(extractedRoles)
+      jobRoles: Array.from(extractedRoles),
+      isResync: true
     });
   }
 

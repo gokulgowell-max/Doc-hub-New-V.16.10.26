@@ -40,6 +40,7 @@ interface ServerState {
   projects: any[];
   recruiters: string[];
   submissions: any[];
+  activities?: any[];
   lastUpdated: string;
 }
 
@@ -63,6 +64,7 @@ const DEFAULT_SERVER_STATE: ServerState = {
   projects: [],
   recruiters: DEFAULT_RECRUITERS,
   submissions: [],
+  activities: [],
   lastUpdated: new Date().toISOString()
 };
 
@@ -392,6 +394,7 @@ function loadServerState(): ServerState {
         projects: Array.isArray(parsed.projects) ? parsed.projects : [],
         recruiters: parsedRecs,
         submissions: cleanSubs,
+        activities: Array.isArray(parsed.activities) ? parsed.activities : [],
         lastUpdated: parsed.lastUpdated || new Date().toISOString()
       };
     }
@@ -528,6 +531,18 @@ app.post("/api/app-state", (req, res) => {
       currentState.submissions = deduplicateServerSubmissions(combined);
     } else {
       currentState.submissions = deduplicateServerSubmissions(currentState.submissions);
+    }
+
+    // 5. Activities management
+    if (incoming.clearActivities === true) {
+      currentState.activities = [];
+    } else if (Array.isArray(incoming.activities) && incoming.activities.length > 0) {
+      const actMap = new Map<string, any>();
+      incoming.activities.forEach(a => { if (a && a.id) actMap.set(a.id, a); });
+      (currentState.activities || []).forEach(a => { if (a && a.id && !actMap.has(a.id)) actMap.set(a.id, a); });
+      currentState.activities = Array.from(actMap.values())
+        .sort((a, b) => new Date(b.timestamp).getTime() - new Date(a.timestamp).getTime())
+        .slice(0, 150);
     }
 
     saveServerState(currentState);
